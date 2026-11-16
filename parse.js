@@ -381,7 +381,18 @@ function matchExtendedAutolink(src, i, prev) {
       const c = src.charCodeAt(j);
       if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 45) { j++; continue; }
       if (c === 46) {
-        if (j === labelStart) { ok = false; break; }
+        if (j === labelStart) {
+          // Consecutive dots: if a domain char follows, the domain has
+          // an empty label (invalid); otherwise these are trailing
+          // sentence dots, so stop the domain scan here.
+          let q = j;
+          while (q < n && src.charCodeAt(q) === 46) q++;
+          if (q < n) {
+            const qc = src.charCodeAt(q);
+            if ((qc >= 65 && qc <= 90) || (qc >= 97 && qc <= 122) || (qc >= 48 && qc <= 57) || qc === 45) { ok = false; break; }
+          }
+          break;
+        }
         lastDot = j;
         labelStart = j + 1;
         j++;
@@ -496,7 +507,10 @@ function isValidEmailAddr(s) {
 //  code: code span (raw)              br: hard break
 //  link: {href, title, nodes}         img: {src, title, alt}
 //  html: raw html                     em/strong/del: {nodes}
-function inlineNodes(src, ctx, noLink) {
+// noLink suppresses [..] links; noExtAuto suppresses bare (GFM
+// extended) autolinks -- those are not recognised inside link text,
+// while <..> autolinks are.
+function inlineNodes(src, ctx, noLink, noExtAuto) {
   const nodes = [];
   const n = src.length;
   let i = 0;
@@ -664,8 +678,8 @@ function inlineNodes(src, ctx, noLink) {
       }
       continue;
     }
-    // Extended autolink (www.) at a word start
-    if ((c === 119 && src.startsWith('www.', i)) || false) {
+    // Extended autolink (www.) at a word start (not inside link text)
+    if (!noExtAuto && ((c === 119 && src.startsWith('www.', i)) || false)) {
       const prev = i > 0 ? src[i - 1] : undefined;
       const ext = matchExtendedAutolink(src, i, prev);
       if (ext) {
@@ -676,7 +690,8 @@ function inlineNodes(src, ctx, noLink) {
       }
     }
     // Plain character (bare scheme autolink, then email autolink)
-    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+    // -- not inside link text.
+    if (!noExtAuto && ((c >= 65 && c <= 90) || (c >= 97 && c <= 122))) {
       const prev = i > 0 ? src[i - 1] : undefined;
       if (prev === undefined || isWSChar(prev) || isPunctChar(prev)) {
         const sch = matchSchemeAutolink(src, i, prev);
@@ -937,22 +952,6 @@ function cleanUrl(href) {
 
 // Does a parsed inline node tree contain a non-autolink link?
 // (Autolinks may nest inside link text; other links may not.)
-// Autolinks inside link text render as literal text (no nested <a>),
-// so replace auto link nodes with their text.
-function flattenAutolinks(nodes) {
-  const out = [];
-  for (const node of nodes) {
-    if (node.k === 'link' && node.auto) {
-      out.push({ k: 't', s: plainText(node.nodes) });
-    } else if (node.nodes) {
-      out.push({ ...node, nodes: flattenAutolinks(node.nodes) });
-    } else {
-      out.push(node);
-    }
-  }
-  return out;
-}
-
 function containsLink(nodes) {
   for (const node of nodes) {
     if (node.k === 'link' && !node.auto) return true;
@@ -971,9 +970,10 @@ function tryLink(src, i, ctx, allowLink) {
   const after = close + 1;
   const n = src.length;
   // Parse the text with links allowed. A link's text may not contain a
-  // (non-autolink) link; an image description may. Autolinks inside
-  // link text render as literal text (no nested <a>).
-  const nodes = flattenAutolinks(resolveEmphasis(inlineNodes(inner, ctx, false)));
+  // (non-autolink) link; an image description may. Bare (extended)
+  // autolinks are not recognised inside link text, but <..> autolinks
+  // are, so suppress only the extended ones here.
+  const nodes = resolveEmphasis(inlineNodes(inner, ctx, false, !allowLink));
   if (!allowLink && containsLink(nodes)) return null;
   // Inline link: [text](...)
   if (after < n && src.charCodeAt(after) === 40) {
