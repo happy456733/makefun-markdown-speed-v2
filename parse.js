@@ -1375,9 +1375,7 @@ function lexHtmlBlock(lines, i) {
   const type = htmlBlockType(rest);
   if (type === 0) return null;
   let end = i;
-  if (type === 7) {
-    end = i;
-  } else if (type === 6) {
+  if (type === 6 || type === 7) {
     end = i;
     while (end + 1 < n && !isBlankLine(lines[end + 1])) end++;
   } else {
@@ -1395,7 +1393,9 @@ function lexHtmlBlock(lines, i) {
     }
     if (end >= n) end = n - 1;
   }
-  const text = lines.slice(i, end + 1).join('\n') + (end < n - 1 ? '\n' : '');
+  // Text is the lines joined; a trailing newline only when the block
+  // runs to the end of the input and the input ends with a newline.
+  const text = lines.slice(i, end + 1).join('\n') + (end === n - 2 && lines[n - 1] === '' ? '\n' : '');
   return { block: { t: 'html', text }, next: end + 1 };
 }
 
@@ -1615,7 +1615,6 @@ function renderBlocks(blocks, ctx, tight) {
         break;
       case 'html':
         out += b.text;
-        if (!b.text.endsWith('\n')) out += '\n';
         break;
       case 'quote':
         out += '<blockquote>\n' + renderBlocks(b.blocks, ctx, false) + '</blockquote>\n';
