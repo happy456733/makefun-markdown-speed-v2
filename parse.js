@@ -1446,24 +1446,21 @@ function lexBlockquote(lines, i, ctx) {
       }
     }
     if (isBlankLine(line)) {
-      // A chunk ending in code/heading/hr/html/table ends the quote:
-      // the next > line starts a new blockquote.
-      const soFar = lexBlocks(inner.join('\n'), ctx);
-      const last = soFar[soFar.length - 1];
-      if (last && (last.t === 'code' || last.t === 'h' || last.t === 'hr' || last.t === 'html' || last.t === 'table')) break;
-      inner.push('');
-      prevLazy = false;
-      j++;
-      continue;
+      // An unmarked blank line ends the quote; the next > line starts
+      // a new blockquote. (A >-marked blank line is handled above.)
+      break;
     }
     // Lazy continuation: only if the inner content ends with an open paragraph
     if (inner.length > 0 && inner[inner.length - 1] !== '' && !isBlockStart(line)) {
       const soFar = lexBlocks(inner.join('\n'), ctx);
       if (endsWithPara(soFar)) {
-        // A setext underline on a lazy line after another lazy line is
-        // paragraph text, indented so it cannot become a heading.
+        // Lazy line: a setext underline after another lazy line is
+        // paragraph text, indented so it cannot become a heading;
+        // otherwise a lazy line loses one indent level (4 spaces).
         const m = line.match(/^ {0,3}((?:=+|-+)[ \t]*)$/);
-        inner.push(m && prevLazy ? '    ' + m[1] : line);
+        if (m && prevLazy) inner.push('    ' + m[1]);
+        else if (ind.spaces >= 4) inner.push(stripIndent(line, 4));
+        else inner.push(line);
         prevLazy = true;
         j++;
         continue;
