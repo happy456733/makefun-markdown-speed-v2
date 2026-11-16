@@ -1934,7 +1934,7 @@ function lexList(lines, i, ctx) {
       // 0-3 spaces in this container and below the content indent.
       // (A thematic break is never a sibling item.)
       if (m2 && m2.ordered === ordered && m2.delim === delim
-          && li.spaces >= listIndent && li.spaces <= 3 && li.spaces < cur.contentIndent
+          && li.spaces <= 3 && li.spaces < cur.contentIndent
           && !isHr(line.slice(li.chars))) {
         items.push(cur);
         cur = startItem(lines, j, m2, listIndent);
@@ -1978,7 +1978,7 @@ function lexList(lines, i, ctx) {
     const nli = indentOf(nl);
     const m2 = matchListMarker(nl.slice(nli.chars));
     if (m2 && m2.ordered === ordered && m2.delim === delim
-        && nli.spaces >= listIndent && nli.spaces <= 3 && nli.spaces < cur.contentIndent) {
+        && nli.spaces <= 3 && nli.spaces < cur.contentIndent) {
       loose = true;
       items.push(cur);
       cur = startItem(lines, k, m2, listIndent);
