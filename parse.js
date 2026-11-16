@@ -598,3 +598,303 @@ function findMatchingBracket(src, i) {
         if (src.charCodeAt(k) === 96) {
           let r = 0;
           while (k + r < n && src.charCodeAt(k + r) === 96) r++;
+          if (r === m) { j = k + r; found = true; break; }
+          k += r;
+        } else k++;
+      }
+      if (!found) j += m;
+      continue;
+    }
+    if (c === 91) { depth++; j++; continue; }
+    if (c === 93) {
+      if (depth === 0) return j;
+      depth--;
+      j++;
+      continue;
+    }
+    j++;
+  }
+  return -1;
+}
+
+// Decode backslash escapes only inside a link destination.
+// (Entities in a destination stay literal, e.g. foo%20b&auml;.)
+function decodeDest(s) {
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c === 92 && i + 1 < s.length && isAsciiPunct(s.charCodeAt(i + 1))) {
+      out += s[i + 1];
+      i += 2;
+      continue;
+    }
+    out += s[i];
+    i++;
+  }
+  return out;
+}
+
+// Decode backslash escapes and entities inside a link title.
+function decodeDestTitle(s) {
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c === 92 && i + 1 < s.length && isAsciiPunct(s.charCodeAt(i + 1))) {
+      out += s[i + 1];
+      i += 2;
+      continue;
+    }
+    if (c === 38) {
+      const dec = decodeEntity(s, i);
+      if (dec) { out += dec[0]; i = dec[1]; continue; }
+    }
+    out += s[i];
+    i++;
+  }
+  return out;
+}
+
+// Parse an inline link tail starting at src[i] === '('.
+// Returns { href, title, end } (end = index after ')') or null.
+function parseInlineTail(src, i) {
+  const n = src.length;
+  let j = i + 1;
+  const skipWS = () => {
+    while (j < n) {
+      const c = src.charCodeAt(j);
+      if (c === 32 || c === 9 || c === 10 || c === 12 || c === 13) j++;
+      else break;
+    }
+  };
+  skipWS();
+  if (j >= n) return null;
+  let href;
+  if (src.charCodeAt(j) === 60) {
+    // <...> destination: no newline, no unescaped < or >
+    let k = j + 1;
+    let raw = '';
+    let closed = false;
+    while (k < n) {
+      const c = src.charCodeAt(k);
+      if (c === 10 || c === 60) return null;
+      if (c === 92 && k + 1 < n) { raw += src[k] + src[k + 1]; k += 2; continue; }
+      if (c === 62) { closed = true; break; }
+      raw += src[k];
+      k++;
+    }
+    if (!closed) return null;
+    href = decodeDest(raw);
+    j = k + 1;
+  } else {
+    // Bare destination: no spaces/control, balanced parens
+    let depth = 0;
+    let raw = '';
+    let k = j;
+    let closed = false;
+    while (k < n) {
+      const c = src.charCodeAt(k);
+      if (c === 92 && k + 1 < n && isAsciiPunct(src.charCodeAt(k + 1))) { raw += src[k] + src[k + 1]; k += 2; continue; }
+      if (c === 32 || c === 9 || c === 10 || c === 12 || c === 13 || c < 32) break;
+      if (c === 40) { depth++; raw += src[k]; k++; continue; }
+      if (c === 41) {
+        if (depth === 0) { closed = true; break; }
+        depth--;
+        raw += src[k];
+        k++;
+        continue;
+      }
+      raw += src[k];
+      k++;
+    }
+    if (closed) {
+      // The ')' closed the link: no title possible
+      href = decodeDest(raw);
+      return { href, title: null, end: k + 1 };
+    }
+    if (depth > 0) return null;
+    if (raw.length === 0) return null;
+    href = decodeDest(raw);
+    j = k;
+  }
+  skipWS();
+  let title = null;
+  if (j < n && src.charCodeAt(j) !== 41) {
+    const q = src.charCodeAt(j);
+    let closeQ;
+    let allowParen = false;
+    if (q === 34) closeQ = 34;
+    else if (q === 39) closeQ = 39;
+    else if (q === 40) { closeQ = 41; allowParen = true; }
+    else return null;
+    let k = j + 1;
+    let raw = '';
+    let closed = false;
+    while (k < n) {
+      const c = src.charCodeAt(k);
+      if (c === 92 && k + 1 < n && isAsciiPunct(src.charCodeAt(k + 1))) { raw += src[k] + src[k + 1]; k += 2; continue; }
+      if (c === closeQ) { closed = true; break; }
+      if (allowParen && c === 40) return null;
+      raw += src[k];
+      k++;
+    }
+    if (!closed) return null;
+    title = decodeDestTitle(raw);
+    j = k + 1;
+    skipWS();
+  }
+  if (j >= n || src.charCodeAt(j) !== 41) return null;
+  return { href, title, end: j + 1 };
+}
+
+// Clean a link URL the way marked does: percent-encode it, keeping literal
+// '%' signs. Returns null when it cannot be encoded (lone surrogate).
+function cleanUrl(href) {
+  try {
+    return encodeURI(href).replace(/%25/g, '%');
+  } catch (e) {
+    return null;
+  }
+}
+
+// Does a parsed inline node tree contain a non-autolink link?
+// (Autolinks may nest inside link text; other links may not.)
+function containsLink(nodes) {
+  for (const node of nodes) {
+    if (node.k === 'link' && !node.auto) return true;
+    if (node.nodes && containsLink(node.nodes)) return true;
+  }
+  return false;
+}
+
+// Try to parse a link starting at src[i] === '['.
+// allowLink: true when parsing an image description (a link may nest
+// inside image text); false for link text (no nested links).
+function tryLink(src, i, ctx, allowLink) {
+  const close = findMatchingBracket(src, i);
+  if (close === -1) return null;
+  const inner = src.slice(i + 1, close);
+  const after = close + 1;
+  const n = src.length;
+  // Parse the text with links allowed. A link's text may not contain a
+  // (non-autolink) link; an image description may.
+  const nodes = resolveEmphasis(inlineNodes(inner, ctx, false));
+  if (!allowLink && containsLink(nodes)) return null;
+  // Inline link: [text](...)
+  if (after < n && src.charCodeAt(after) === 40) {
+    const tail = parseInlineTail(src, after);
+    if (tail) {
+      return { node: { k: 'link', href: tail.href, title: tail.title, nodes }, end: tail.end };
+    }
+    // Invalid inline form: fall through to reference / shortcut.
+  }
+  // Reference link: [text][label] or [text][]
+  if (after < n && src.charCodeAt(after) === 91) {
+    const labelClose = findMatchingBracket(src, after);
+    if (labelClose !== -1) {
+      const labelRaw = src.slice(after + 1, labelClose);
+      const label = labelRaw.length === 0 ? normalizeLabel(inner) : normalizeLabel(labelRaw);
+      const ref = ctx.links.get(label);
+      if (ref) {
+        return { node: { k: 'link', href: ref.href, title: ref.title, nodes }, end: labelClose + 1 };
+      }
+      // A complete [label] follows but is undefined: no shortcut fallback.
+      return null;
+    }
+    // No closing bracket for the label: fall through to shortcut.
+  }
+  // Shortcut link: [text]
+  const ref = ctx.links.get(normalizeLabel(inner));
+  if (ref) {
+    return { node: { k: 'link', href: ref.href, title: ref.title, nodes }, end: after };
+  }
+  return null;
+}
+
+// Plain-text rendering of inline nodes (for image alt text).
+function plainText(nodes) {
+  let out = '';
+  for (const node of nodes) {
+    if (node.k === 't' || node.k === 'code') out += node.s;
+    else if (node.k === 'em' || node.k === 'strong' || node.k === 'del' || node.k === 'link') out += plainText(node.nodes);
+    else if (node.k === 'img') out += node.alt;
+  }
+  return out;
+}
+
+// Try to parse an image starting at src[i] === '!'.
+function tryImage(src, i, ctx) {
+  const link = tryLink(src, i + 1, ctx, true);
+  if (!link) return null;
+  const alt = plainText(link.node.nodes);
+  return { node: { k: 'img', src: link.node.href, title: link.node.title, alt }, end: link.end };
+}
+
+// Resolve emphasis/strong/strikethrough delimiters (CommonMark phase 2).
+function resolveEmphasis(nodes) {
+  const stack = [];
+  let i = 0;
+  while (i < nodes.length) {
+    const node = nodes[i];
+    if (node.k !== 'd') { i++; continue; }
+    if (node.close) {
+      let opener = null;
+      let openerPos = -1;
+      for (let s = stack.length - 1; s >= 0; s--) {
+        const o = stack[s];
+        if (o.c !== node.c) continue;
+        if (o.close && node.open && (o.n + node.n) % 3 === 0) continue;
+        opener = o;
+        openerPos = s;
+        break;
+      }
+      if (opener) {
+        const use = (opener.n >= 2 && node.n >= 2) ? 2 : 1;
+        const kind = use === 2 ? (node.c === '~' ? 'del' : 'strong') : 'em';
+        const oi = nodes.indexOf(opener);
+        const children = nodes.slice(oi + 1, i);
+        // Delimiters swallowed inside the new emphasis node leave the stack.
+        for (const child of children) {
+          if (child.k === 'd') {
+            const si = stack.indexOf(child);
+            if (si !== -1) stack.splice(si, 1);
+          }
+        }
+        const emNode = { k: kind, nodes: children };
+        opener.n -= use;
+        node.n -= use;
+        const replacement = [];
+        if (opener.n > 0) replacement.push(opener);
+        replacement.push(emNode);
+        if (node.n > 0) replacement.push(node);
+        nodes.splice(oi, i - oi + 1, ...replacement);
+        if (opener.n === 0) stack.splice(openerPos, 1);
+        if (node.n > 0) {
+          i = oi + (opener.n > 0 ? 1 : 0) + 1;
+        } else {
+          i = oi + (opener.n > 0 ? 1 : 0) + 1;
+        }
+        continue;
+      }
+      if (node.open) stack.push(node);
+      i++;
+    } else if (node.open) {
+      stack.push(node);
+      i++;
+    } else {
+      i++;
+    }
+  }
+  return nodes;
+}
+
+// Render resolved inline nodes to HTML.
+function renderInline(nodes) {
+  let out = '';
+  for (const node of nodes) {
+    switch (node.k) {
+      case 't':
+        out += escText(node.s);
+        break;
+      case 'code':
