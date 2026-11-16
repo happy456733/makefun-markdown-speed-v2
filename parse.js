@@ -1922,7 +1922,10 @@ function lexList(lines, i, ctx) {
         const dedented = li.spaces >= cur.contentIndent ? stripIndent(line, cur.contentIndent) : line;
         cur.lines.push(dedented);
         if (!isBlankLine(line)) fenceHasContent = true;
-        if (!isBlankLine(line) && li.spaces <= 3 && fenceClose(line.slice(li.chars))) { fence = null; fenceHasContent = false; }
+        // The closing fence is judged on the dedented line (its indent
+        // is relative to the item, not the document).
+        const di = indentOf(dedented);
+        if (!isBlankLine(line) && di.spaces <= 3 && fenceClose(dedented.slice(di.chars))) { fence = null; fenceHasContent = false; }
         j++;
         continue;
       }
