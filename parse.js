@@ -1882,6 +1882,24 @@ function lexList(lines, i, ctx) {
   let loose = false;
   let cur = startItem(lines, i, firstMarker, listIndent);
   let j = i + 1;
+  // A fenced code block open inside the current item: its content lines
+  // belong to the item whatever their indent, until the closing fence.
+  // (Without this, a 0-indent line inside a fence ends the list and the
+  // fence's closing line re-opens as a new fence that swallows the rest.)
+  // But the fence's FIRST content line must be indented to the item's
+  // content indent (or blank); a 0-indent first line leaves the fence
+  // empty and the line is ordinary content.
+  let fence = null;
+  let fenceHasContent = false;
+  const fenceClose = (s) => {
+    const m = s.match(/^(`{3,}|~{3,})[ \t]*$/);
+    return m && m[1][0] === fence.ch && m[1].length >= fence.len;
+  };
+  const noteFenceOpen = (s) => {
+    const f = matchFence(s);
+    if (f) { fence = { ch: f.ch, len: f.fence.length }; fenceHasContent = false; }
+  };
+  if (cur.lines.length > 0) noteFenceOpen(cur.lines[0]);
   const itemHasContent = (it) => it.lines.some((l) => !isBlankLine(l));
   const itemEndsWithPara = (it) => {
     if (it.lines.length === 0) return false;
@@ -1892,6 +1910,23 @@ function lexList(lines, i, ctx) {
   };
   while (j < n) {
     const line = lines[j];
+    // Inside a fenced code block, every line is item content (blank or
+    // not, any indent) until the closing fence. But the first content
+    // line must be indented (or blank); a 0-indent first line leaves
+    // the fence empty and falls through to ordinary handling.
+    if (fence) {
+      const li = indentOf(line);
+      if (!fenceHasContent && !isBlankLine(line) && li.spaces < cur.contentIndent) {
+        fence = null;
+      } else {
+        const dedented = li.spaces >= cur.contentIndent ? stripIndent(line, cur.contentIndent) : line;
+        cur.lines.push(dedented);
+        if (!isBlankLine(line)) fenceHasContent = true;
+        if (!isBlankLine(line) && li.spaces <= 3 && fenceClose(line.slice(li.chars))) { fence = null; fenceHasContent = false; }
+        j++;
+        continue;
+      }
+    }
     if (!isBlankLine(line)) {
       const li = indentOf(line);
       const m2 = matchListMarker(line.slice(li.chars));
@@ -1903,6 +1938,9 @@ function lexList(lines, i, ctx) {
           && !isHr(line.slice(li.chars))) {
         items.push(cur);
         cur = startItem(lines, j, m2, listIndent);
+        fence = null;
+        fenceHasContent = false;
+        if (cur.lines.length > 0) noteFenceOpen(cur.lines[0]);
         j++;
         continue;
       }
@@ -1919,7 +1957,9 @@ function lexList(lines, i, ctx) {
         break;
       }
       if (li.spaces >= cur.contentIndent) {
-        cur.lines.push(stripIndent(line, cur.contentIndent));
+        const dedented = stripIndent(line, cur.contentIndent);
+        cur.lines.push(dedented);
+        noteFenceOpen(dedented);
         j++;
         continue;
       }
@@ -2069,3 +2109,4 @@ export function parse(markdown) {
   const ctx = { links: new Map() };
   return renderBlocks(lexBlocks(src, ctx), ctx, false);
 }
+
