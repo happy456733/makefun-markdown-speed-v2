@@ -278,13 +278,16 @@ function matchHtmlTag(src, i) {
       else break;
     }
     if (j === aStart) return null;
-    while (j < n) {
-      const a = src.charCodeAt(j);
-      if (a === 32 || a === 9 || a === 10 || a === 12 || a === 13) j++;
+    // Optional value: only consume the whitespace before '=' if '='
+    // actually follows (otherwise the whitespace separates attributes).
+    let k = j;
+    while (k < n) {
+      const a = src.charCodeAt(k);
+      if (a === 32 || a === 9 || a === 10 || a === 12 || a === 13) k++;
       else break;
     }
-    if (src.charCodeAt(j) === 61) {
-      j++;
+    if (src.charCodeAt(k) === 61) {
+      j = k + 1;
       while (j < n) {
         const a = src.charCodeAt(j);
         if (a === 32 || a === 9 || a === 10 || a === 12 || a === 13) j++;
@@ -425,12 +428,25 @@ function matchSchemeAutolink(src, i, prev) {
   // If the address part (before any /, ?, #) contains an '@', it must
   // be a valid email address (mailto:/xmpp: style addresses).
   const at = url.indexOf('@');
-  if (at !== -1) {
-    let cut = url.length;
-    for (let q = 0; q < url.length; q++) {
-      if (url[q] === '/' || url[q] === '?' || url[q] === '#') { cut = q; break; }
+  let cut = url.length;
+  for (let q = 0; q < url.length; q++) {
+    if (url[q] === '/' || url[q] === '?' || url[q] === '#') { cut = q; break; }
+  }
+  if (at !== -1 && at < cut && !isValidEmailAddr(url.slice(k + 1 - i, cut))) return null;
+  // mailto: takes just the email address; xmpp: takes the email plus
+  // one optional /resource segment (no '/' or '@' inside it).
+  const scheme = src.slice(i, k);
+  if ((scheme === 'mailto' || scheme === 'xmpp') && at !== -1 && at < cut) {
+    if (scheme === 'mailto') {
+      return { href: url.slice(0, cut), text: url.slice(0, cut), end: i + cut };
     }
-    if (at < cut && !isValidEmailAddr(url.slice(k + 1 - i, cut))) return null;
+    if (cut < url.length && url[cut] === '/') {
+      let segEnd = cut + 1;
+      while (segEnd < url.length && url[segEnd] !== '/' && url[segEnd] !== '@' && url[segEnd] !== '?' && url[segEnd] !== '#') segEnd++;
+      if (segEnd === cut + 1) return { href: url.slice(0, cut), text: url.slice(0, cut), end: i + cut };
+      return { href: url.slice(0, segEnd), text: url.slice(0, segEnd), end: i + segEnd };
+    }
+    return { href: url.slice(0, cut), text: url.slice(0, cut), end: i + cut };
   }
   return { href: url, text: url, end };
 }
@@ -472,8 +488,22 @@ function inlineNodes(src, ctx, noLink) {
     // Backslash escape / hard break
     if (c === 92) {
       const d = src.charCodeAt(i + 1);
-      if (d === 10) { flush(); nodes.push({ k: 'br' }); i += 2; continue; }
-      if (i + 1 < n && isAsciiPunct(d)) { buf += src[i + 1]; i += 2; continue; }
+      if (d === 10) {
+        flush();
+        nodes.push({ k: 'br' });
+        i += 2;
+        // A hard break swallows the next line's leading whitespace.
+        while (i < n && (src.charCodeAt(i) === 32 || src.charCodeAt(i) === 9)) i++;
+        continue;
+      }
+      // An escaped & is a literal & (pre-escaped so the following text
+      // is not mistaken for an entity reference).
+      if (i + 1 < n && isAsciiPunct(d)) {
+        if (d === 38) buf += '&amp;';
+        else buf += src[i + 1];
+        i += 2;
+        continue;
+      }
       buf += '\\';
       i++;
       continue;
@@ -604,10 +634,13 @@ function inlineNodes(src, ctx, noLink) {
         buf = buf.slice(0, t);
         flush();
         nodes.push({ k: 'br' });
+        i++;
+        // A hard break swallows the next line's leading whitespace.
+        while (i < n && (src.charCodeAt(i) === 32 || src.charCodeAt(i) === 9)) i++;
       } else {
         buf += '\n';
+        i++;
       }
-      i++;
       continue;
     }
     // Extended autolink (www.) at a word start
@@ -762,7 +795,10 @@ function decodeDestTitle(s) {
   while (i < s.length) {
     const c = s.charCodeAt(i);
     if (c === 92 && i + 1 < s.length && isAsciiPunct(s.charCodeAt(i + 1))) {
-      out += s[i + 1];
+      // An escaped & is a literal & (pre-escaped so it is not read as
+      // an entity reference).
+      if (s.charCodeAt(i + 1) === 38) out += '&amp;';
+      else out += s[i + 1];
       i += 2;
       continue;
     }
@@ -965,9 +1001,10 @@ function resolveEmphasis(nodes) {
         const o = stack[s];
         if (o.c !== node.c) continue;
         // Odd-match rule: if either delimiter can both open and close,
-        // the sum of the run lengths must not be a multiple of 3.
+        // the sum of the run lengths must not be a multiple of 3,
+        // unless both lengths are multiples of 3.
         const oddMatch = (o.open && o.close) || (node.open && node.close);
-        if (oddMatch && (o.n + node.n) % 3 === 0) continue;
+        if (oddMatch && (o.n + node.n) % 3 === 0 && !(o.n % 3 === 0 && node.n % 3 === 0)) continue;
         opener = o;
         openerPos = s;
         break;
@@ -1379,7 +1416,22 @@ function splitRow(line) {
           j += r;
         } else j++;
       }
-      if (found !== -1) { cur += t.slice(i, found + m); i = found + m; continue; }
+      if (found !== -1) {
+        // Inside a code span, \| is still the table escape (the
+        // backslash is consumed); \\ stays an escaped backslash.
+        const span = t.slice(i, found + m);
+        let out = '';
+        for (let q = 0; q < span.length; q++) {
+          if (span[q] === '\\' && q + 1 < span.length) {
+            if (span[q + 1] === '|') { out += '|'; q++; }
+            else if (span[q + 1] === '\\') { out += '\\\\'; q++; }
+            else out += span[q];
+          } else out += span[q];
+        }
+        cur += out;
+        i = found + m;
+        continue;
+      }
       cur += t.slice(i, i + m);
       i += m;
       continue;
@@ -1486,9 +1538,7 @@ function lexParagraph(lines, i, ctx) {
       if (lm && listCanInterrupt(lm)) break;
       if (htmlBlockType(rest) >= 1 && htmlBlockType(rest) <= 6) break;
     }
-    // A continuation line loses its leading whitespace (a paragraph
-    // continuation never keeps the indent).
-    paraLines.push(j === i ? line : line.replace(/^[ \t]+/, ''));
+    paraLines.push(line);
     j++;
   }
   if (tableSplit !== -1) {
@@ -1622,14 +1672,13 @@ function htmlBlockType(rest) {
   if (rest.startsWith('<?')) return 3;
   if (/^<![A-Za-z]/.test(rest)) return 4;
   if (rest.startsWith('<![CDATA[')) return 5;
-  // Type 6: a block tag (a complete, valid open/close tag whose name is
-  // a block-level tag). Type 7: a complete, valid tag alone on the line.
+  // Type 6: the line starts a block tag (the tag itself may continue
+  // on later lines, so only the tag name is checked here).
+  const m = rest.match(/^<\/?([A-Za-z][A-Za-z0-9-]*)(\s|\/?>|$)/);
+  if (m && BLOCK_TAGS.has(m[1].toLowerCase())) return 6;
+  // Type 7: a complete, valid tag alone on the line.
   const te = matchHtmlTag(rest, 0);
-  if (te !== null) {
-    const nm = rest.match(/^<\/?([A-Za-z][A-Za-z0-9-]*)/);
-    if (nm && BLOCK_TAGS.has(nm[1].toLowerCase())) return 6;
-    if (rest.slice(te).trim() === '') return 7;
-  }
+  if (te !== null && rest.slice(te).trim() === '') return 7;
   return 0;
 }
 
@@ -1893,8 +1942,9 @@ function lexTable(lines, i, delim, ctx) {
   const rows = [];
   let j = i + 2;
   while (j < n && !isBlankLine(lines[j])) {
-    // A table row must contain a pipe; a line without one ends the table.
-    if (!lines[j].includes('|')) break;
+    // A row ends the table if it starts a new block or is indented 4+;
+    // a plain line without a pipe is a single-cell row.
+    if (isBlockStart(lines[j]) || indentOf(lines[j]).spaces >= 4) break;
     const row = splitRow(lines[j]);
     while (row.length < header.length) row.push('');
     rows.push(row.slice(0, header.length));
