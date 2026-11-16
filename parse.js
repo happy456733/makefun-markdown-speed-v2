@@ -860,7 +860,7 @@ function renderInline(nodes) {
         out += '<code>' + escText(node.s) + '</code>';
         break;
       case 'br':
-        out += '<br>\n';
+        out += '<br>';
         break;
       case 'html':
         out += node.s;
@@ -1223,7 +1223,12 @@ function lexParagraph(lines, i, ctx) {
   let tableSplit = -1;
   while (j < n) {
     const line = lines[j];
-    if (isBlankLine(line)) break;
+    if (isBlankLine(line)) {
+      // A whitespace-only FINAL line is paragraph content: marked's
+      // paragraph regex only excludes a blank line followed by a newline.
+      if (j === n - 1 && line.length > 0) { paraLines.push(line); j++; }
+      break;
+    }
     const ind = indentOf(line);
     const rest = line.slice(ind.chars);
     if (j > i && ind.spaces <= 3) {
@@ -1413,6 +1418,7 @@ function isBlockStart(line) {
 function lexBlockquote(lines, i, ctx) {
   const n = lines.length;
   const inner = [];
+  let prevLazy = false;
   let j = i;
   while (j < n) {
     const line = lines[j];
@@ -1423,12 +1429,14 @@ function lexBlockquote(lines, i, ctx) {
         let content = rest.slice(1);
         if (content.startsWith(' ')) content = content.slice(1);
         inner.push(content);
+        prevLazy = false;
         j++;
         continue;
       }
     }
     if (isBlankLine(line)) {
       inner.push('');
+      prevLazy = false;
       j++;
       continue;
     }
@@ -1437,7 +1445,11 @@ function lexBlockquote(lines, i, ctx) {
       const soFar = lexBlocks(inner.join('\n'), ctx);
       const last = soFar[soFar.length - 1];
       if (last && last.t === 'para') {
-        inner.push(line);
+        // A setext underline on a lazy line after another lazy line is
+        // paragraph text, indented so it cannot become a heading.
+        const m = line.match(/^ {0,3}((?:=+|-+)[ \t]*)$/);
+        inner.push(m && prevLazy ? '    ' + m[1] : line);
+        prevLazy = true;
         j++;
         continue;
       }
