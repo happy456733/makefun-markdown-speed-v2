@@ -1090,6 +1090,9 @@ function parseLinkRef(s) {
     if (sameLine < n && s.charCodeAt(sameLine) !== 10) return null;
     return { label: normalizeLabel(label), href, title: null, rest: s.slice(afterDest) };
   }
+  // A same-line title must be preceded by whitespace: a title delimiter
+  // immediately after the destination is junk, voiding the definition.
+  if (titleSameLine && titleAt === afterDest) return null;
   const q = s.charCodeAt(titleAt);
   let closeQ;
   let allowParen = false;
