@@ -1393,9 +1393,13 @@ function lexHtmlBlock(lines, i) {
     }
     if (end >= n) end = n - 1;
   }
-  // Text is the lines joined; a trailing newline only when the block
-  // runs to the end of the input and the input ends with a newline.
-  const text = lines.slice(i, end + 1).join('\n') + (end === n - 2 && lines[n - 1] === '' ? '\n' : '');
+  // Text is the lines joined; the newline after the last line belongs
+  // to the block unless the next line is a blank separator line.
+  let trail = false;
+  if (end + 1 < n) {
+    trail = end + 1 === n - 1 ? true : !isBlankLine(lines[end + 1]);
+  }
+  const text = lines.slice(i, end + 1).join('\n') + (trail ? '\n' : '');
   return { block: { t: 'html', text }, next: end + 1 };
 }
 
