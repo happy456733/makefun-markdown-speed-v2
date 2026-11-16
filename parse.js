@@ -937,6 +937,22 @@ function cleanUrl(href) {
 
 // Does a parsed inline node tree contain a non-autolink link?
 // (Autolinks may nest inside link text; other links may not.)
+// Autolinks inside link text render as literal text (no nested <a>),
+// so replace auto link nodes with their text.
+function flattenAutolinks(nodes) {
+  const out = [];
+  for (const node of nodes) {
+    if (node.k === 'link' && node.auto) {
+      out.push({ k: 't', s: plainText(node.nodes) });
+    } else if (node.nodes) {
+      out.push({ ...node, nodes: flattenAutolinks(node.nodes) });
+    } else {
+      out.push(node);
+    }
+  }
+  return out;
+}
+
 function containsLink(nodes) {
   for (const node of nodes) {
     if (node.k === 'link' && !node.auto) return true;
@@ -955,8 +971,9 @@ function tryLink(src, i, ctx, allowLink) {
   const after = close + 1;
   const n = src.length;
   // Parse the text with links allowed. A link's text may not contain a
-  // (non-autolink) link; an image description may.
-  const nodes = resolveEmphasis(inlineNodes(inner, ctx, false));
+  // (non-autolink) link; an image description may. Autolinks inside
+  // link text render as literal text (no nested <a>).
+  const nodes = flattenAutolinks(resolveEmphasis(inlineNodes(inner, ctx, false)));
   if (!allowLink && containsLink(nodes)) return null;
   // Inline link: [text](...)
   if (after < n && src.charCodeAt(after) === 40) {
@@ -2005,13 +2022,16 @@ function renderBlocks(blocks, ctx, tight) {
             ? (item.checked ? '<input checked="" disabled="" type="checkbox"> ' : '<input disabled="" type="checkbox"> ')
             : '';
           const body = renderBlocks(item.blocks, ctx, !b.loose);
-          if (b.loose) {
-            out += '<li>' + box + body + '</li>\n';
+          // A task checkbox belongs inside the item's first paragraph
+          // (loose lists render <p> tags); in a tight list it sits
+          // directly in the <li> before the text.
+          let li = '<li>';
+          if (box && body.startsWith('<p>')) {
+            li += '<p>' + box + body.slice(3);
           } else {
-            // Tight items keep the body's trailing newline (a code block,
-            // blockquote, heading or nested list ends with one).
-            out += '<li>' + box + body + '</li>\n';
+            li += box + body;
           }
+          out += li + '</li>\n';
         }
         out += '</' + tag + '>\n';
         break;
