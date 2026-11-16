@@ -1418,10 +1418,12 @@ function matchListMarker(rest) {
   return null;
 }
 
-// Can a list with this marker interrupt a paragraph?
+// Can a list with this marker interrupt a paragraph? An empty item
+// cannot interrupt, and an ordered list must start with 1.
 function listCanInterrupt(lm) {
+  if (lm.empty) return false;
   if (lm.ordered) return lm.start === 1;
-  return !lm.empty;
+  return true;
 }
 
 // Block-level HTML tag names (CommonMark HTML block type 6).
@@ -1556,7 +1558,9 @@ function startItem(lines, j, m, listIndent) {
   const rest = line.slice(ind.chars);
   const skip = m.spaces === 0 ? 0 : (m.spaces <= 4 ? m.spaces : 1);
   let content = rest.slice(m.markerLen + skip);
-  const contentIndent = listIndent + m.markerLen + (m.spaces === 0 ? 1 : (m.spaces <= 4 ? m.spaces : 1));
+  // An empty item's content starts one space after the marker, whatever
+  // whitespace follows the marker on its line.
+  const contentIndent = ind.spaces + m.markerLen + (content.trim() === '' ? 1 : (m.spaces === 0 ? 1 : (m.spaces <= 4 ? m.spaces : 1)));
   const item = { lines: [], contentIndent, task: false, checked: false };
   const tm = content.match(/^\[([ xX])\](?:[ \t]+|$)/);
   if (tm) {
@@ -1604,7 +1608,7 @@ function lexList(lines, i, ctx) {
       }
       if (li.spaces < listIndent) {
         if (itemEndsWithPara(cur) && !isBlockStart(line)) {
-          cur.lines.push(line);
+          cur.lines.push(stripIndent(line, cur.contentIndent));
           j++;
           continue;
         }
@@ -1616,7 +1620,7 @@ function lexList(lines, i, ctx) {
         continue;
       }
       if (itemEndsWithPara(cur) && !isBlockStart(line)) {
-        cur.lines.push(line);
+        cur.lines.push(stripIndent(line, cur.contentIndent));
         j++;
         continue;
       }
@@ -1639,7 +1643,10 @@ function lexList(lines, i, ctx) {
       }
     }
     if (nli.spaces >= cur.contentIndent) {
-      if (itemHasContent(cur)) loose = true;
+      // Content after a blank line attaches only if the item already
+      // has content; after an empty item it is a separate block.
+      if (!itemHasContent(cur)) break;
+      loose = true;
       for (let b = j; b < k; b++) cur.lines.push('');
       j = k;
       continue;
@@ -1706,9 +1713,9 @@ function renderBlocks(blocks, ctx, tight) {
           if (b.loose) {
             out += '<li>' + box + body + '</li>\n';
           } else {
-            let trimmed = body;
-            if (trimmed.endsWith('\n')) trimmed = trimmed.slice(0, -1);
-            out += '<li>' + box + trimmed + '</li>\n';
+            // Tight items keep the body's trailing newline (a code block,
+            // blockquote, heading or nested list ends with one).
+            out += '<li>' + box + body + '</li>\n';
           }
         }
         out += '</' + tag + '>\n';
