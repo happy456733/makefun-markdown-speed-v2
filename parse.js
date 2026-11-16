@@ -1106,12 +1106,12 @@ function setextLevel(rest) {
 // Is the line a table delimiter row? Returns the alignments array or null.
 function tableDelimiter(rest) {
   const t = rest.trim();
-  if (!/^:?-+:?$/.test(t) && !/^\|/.test(t) && t.indexOf('|') === -1) {
+  if (t.indexOf('|') === -1) {
     // A single cell without pipes: only a delimiter if it has a colon
     // (a plain --- is a setext underline, not a table delimiter).
-    if (!/^:?-+:?$/.test(t)) return null;
-    if (t.indexOf(':') === -1) return null;
-    return [t[0] === ':' ? (t[t.length - 1] === ':' ? 'center' : 'left') : 'right'];
+    const m = t.match(/^(:?)-+(:?)$/);
+    if (!m || (m[1] === '' && m[2] === '')) return null;
+    return [m[1] && m[2] ? 'center' : m[1] ? 'left' : 'right'];
   }
   let cells = t.split('|');
   if (cells[0] === '') cells = cells.slice(1);
