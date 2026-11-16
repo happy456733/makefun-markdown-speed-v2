@@ -1197,3 +1197,303 @@ function tableDelimiter(rest) {
   }
   return aligns;
 }
+
+// Split a table row line into raw cell strings.
+function splitRow(line) {
+  let t = line.trim();
+  let cells = [];
+  let cur = '';
+  let i = 0;
+  if (t.startsWith('|')) { i = 1; }
+  let end = t.length;
+  if (t.endsWith('|') && t.length > 0) {
+    // Only treat a trailing | as a boundary when it is unescaped
+    let bs = 0;
+    for (let k = t.length - 2; k >= 0 && t[k] === '\\'; k--) bs++;
+    if (bs % 2 === 0) end = t.length - 1;
+  }
+  while (i < end) {
+    const c = t[i];
+    if (c === '\\' && i + 1 < end) { cur += t[i] + t[i + 1]; i += 2; continue; }
+    if (c === '`') {
+      let m = 0;
+      while (i + m < end && t[i + m] === '`') m++;
+      let j = i + m;
+      let found = -1;
+      while (j < end) {
+        if (t[j] === '`') {
+          let r = 0;
+          while (j + r < end && t[j + r] === '`') r++;
+          if (r === m) { found = j; break; }
+          j += r;
+        } else j++;
+      }
+      if (found !== -1) { cur += t.slice(i, found + m); i = found + m; continue; }
+      cur += t.slice(i, i + m);
+      i += m;
+      continue;
+    }
+    if (c === '|') { cells.push(cur); cur = ''; i++; continue; }
+    cur += c;
+    i++;
+  }
+  cells.push(cur);
+  return cells.map((s) => s.trim());
+}
+
+function lexIndentedCode(lines, i, blocks) {
+  const n = lines.length;
+  let end = i;
+  let lastContent = i;
+  while (end < n) {
+    const l = lines[end];
+    if (isBlankLine(l)) { end++; continue; }
+    if (indentOf(l).spaces >= 4) { lastContent = end; end++; continue; }
+    break;
+  }
+  const content = [];
+  for (let k = i; k <= lastContent; k++) {
+    content.push(isBlankLine(lines[k]) ? '' : stripIndent(lines[k], 4));
+  }
+  // Code block text always ends with a newline, even at end of input.
+  const text = content.join('\n') + '\n';
+  blocks.push({ t: 'code', lang: null, text });
+  return end;
+}
+
+function lexFencedCode(lines, i, fence, blocks) {
+  const n = lines.length;
+  let j = i + 1;
+  let closed = false;
+  while (j < n) {
+    const l = lines[j];
+    if (!isBlankLine(l)) {
+      const li = indentOf(l);
+      if (li.spaces <= 3) {
+        const r = l.slice(li.chars);
+        const m = r.match(/^(`{3,}|~{3,})[ \t]*$/);
+        if (m && m[1][0] === fence.ch && m[1].length >= fence.fence.length) { closed = true; break; }
+      }
+    }
+    j++;
+  }
+  const contentEnd = closed ? j - 1 : n - 1;
+  // Content lines are dedented by the opening fence's indent.
+  const fenceIndent = indentOf(lines[i]).spaces;
+  const contentLines = lines.slice(i + 1, contentEnd + 1).map((l) => stripIndent(l, fenceIndent));
+  let text = contentLines.join('\n');
+  // A non-empty content ends with a newline, unless it already does
+  // (trailing blank lines). Empty content stays empty.
+  if (text.length > 0 && !text.endsWith('\n')) text += '\n';
+  const info = fence.info.trim();
+  const lang = info ? info.split(/\s+/)[0] : null;
+  blocks.push({ t: 'code', lang, text });
+  return closed ? j + 1 : n;
+}
+
+// Collect a paragraph starting at lines[i]. Returns { block, next }.
+function lexParagraph(lines, i, ctx) {
+  const n = lines.length;
+  const paraLines = [];
+  let j = i;
+  let tableSplit = -1;
+  while (j < n) {
+    const line = lines[j];
+    if (isBlankLine(line)) {
+      // A whitespace-only FINAL line is paragraph content: marked's
+      // paragraph regex only excludes a blank line followed by a newline.
+      if (j === n - 1 && line.length > 0) { paraLines.push(line); j++; }
+      break;
+    }
+    const ind = indentOf(line);
+    const rest = line.slice(ind.chars);
+    if (j > i && ind.spaces <= 3) {
+      const sl = setextLevel(rest);
+      if (sl) {
+        const text = stripLinkRefs(paraLines.join('\n'), ctx).trim();
+        if (text) {
+          return { block: { t: 'h', level: sl, text }, next: j + 1 };
+        }
+        // The paragraph so far is only link reference definitions: the
+        // underline is ordinary paragraph text, not a heading.
+      }
+      const delim = tableDelimiter(rest.trim());
+      if (delim && paraLines.length > 0) {
+        const header = splitRow(paraLines[paraLines.length - 1]);
+        if (header.length === delim.length) {
+          tableSplit = j - 1;
+          break;
+        }
+      }
+      if (matchAtx(rest)) break;
+      if (matchFence(rest)) break;
+      if (isHr(rest)) break;
+      if (rest.startsWith('>')) break;
+      const lm = matchListMarker(rest);
+      if (lm && listCanInterrupt(lm)) break;
+      if (htmlBlockType(rest) >= 1 && htmlBlockType(rest) <= 6) break;
+    }
+    paraLines.push(line);
+    j++;
+  }
+  if (tableSplit !== -1) {
+    paraLines.pop();
+    const text = stripLinkRefs(paraLines.join('\n'), ctx);
+    return { block: text ? { t: 'para', text } : null, next: tableSplit };
+  }
+  const text = stripLinkRefs(paraLines.join('\n'), ctx);
+  return { block: text ? { t: 'para', text } : null, next: j };
+}
+
+// Lex blocks from a source string. ctx carries the link reference map.
+// If out is given, out.loose is set when a blank line separates two
+// top-level blocks in this call (used for list looseness).
+function lexBlocks(src, ctx, out) {
+  const lines = src.split('\n');
+  const blocks = [];
+  const n = lines.length;
+  let i = 0;
+  let loose = false;
+  while (i < n) {
+    const line = lines[i];
+    if (isBlankLine(line)) {
+      // A blank line after a block makes this loose if more content follows.
+      if (blocks.length > 0) {
+        let k = i + 1;
+        while (k < n && isBlankLine(lines[k])) k++;
+        if (k < n) loose = true;
+      }
+      i++;
+      continue;
+    }
+    const ind = indentOf(line);
+    const rest = line.slice(ind.chars);
+    if (ind.spaces >= 4) {
+      i = lexIndentedCode(lines, i, blocks);
+      continue;
+    }
+    const atx = matchAtx(rest);
+    if (atx) {
+      blocks.push({ t: 'h', level: atx.level, text: atx.content });
+      i++;
+      continue;
+    }
+    const fence = matchFence(rest);
+    if (fence) {
+      i = lexFencedCode(lines, i, fence, blocks);
+      continue;
+    }
+    if (isHr(rest)) { blocks.push({ t: 'hr' }); i++; continue; }
+    const html = lexHtmlBlock(lines, i);
+    if (html) { blocks.push(html.block); i = html.next; continue; }
+    if (rest.startsWith('>')) {
+      const q = lexBlockquote(lines, i, ctx);
+      blocks.push(q.block);
+      i = q.next;
+      continue;
+    }
+    const lm = matchListMarker(rest);
+    if (lm) {
+      const l = lexList(lines, i, ctx);
+      blocks.push(l.block);
+      i = l.next;
+      continue;
+    }
+    if (i + 1 < n) {
+      const delim = tableDelimiter(lines[i + 1].trim());
+      if (delim) {
+        const header = splitRow(rest);
+        if (header.length === delim.length) {
+          const t = lexTable(lines, i, delim, ctx);
+          blocks.push(t.block);
+          i = t.next;
+          continue;
+        }
+      }
+    }
+    const p = lexParagraph(lines, i, ctx);
+    if (p.block) blocks.push(p.block);
+    i = p.next;
+  }
+  if (out) out.loose = loose;
+  return blocks;
+}
+
+// Match a list marker at the start of rest (indent already stripped).
+// Returns { ordered, delim, start, markerLen, spaces, empty } or null.
+function matchListMarker(rest) {
+  let m = rest.match(/^([-*+])((?:[ \t]+)|$)/);
+  if (m) {
+    const spaces = m[2].length;
+    const skip = spaces === 0 ? 0 : (spaces <= 4 ? spaces : 1);
+    const content = rest.slice(1 + skip);
+    return { ordered: false, delim: m[1], start: 0, markerLen: 1, spaces, empty: content.trim() === '' };
+  }
+  m = rest.match(/^(\d{1,9})([.)])((?:[ \t]+)|$)/);
+  if (m) {
+    const spaces = m[3].length;
+    const skip = spaces === 0 ? 0 : (spaces <= 4 ? spaces : 1);
+    const content = rest.slice(m[1].length + 1 + skip);
+    return { ordered: true, delim: m[2], start: parseInt(m[1], 10), markerLen: m[1].length + 1, spaces, empty: content.trim() === '' };
+  }
+  return null;
+}
+
+// Can a list with this marker interrupt a paragraph? An empty item
+// cannot interrupt, and an ordered list must start with 1.
+function listCanInterrupt(lm) {
+  if (lm.empty) return false;
+  if (lm.ordered) return lm.start === 1;
+  return true;
+}
+
+// Block-level HTML tag names (CommonMark HTML block type 6).
+const BLOCK_TAGS = new Set(('address article aside base basefont blockquote body caption center col colgroup dd details dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html iframe legend li link main menu menuitem meta nav noframes ol optgroup option p param section source summary table tbody td tfoot th thead title tr track ul').split(' '));
+
+// Which HTML block type (1-7) starts at this line, or 0.
+function htmlBlockType(rest) {
+  if (/^<(script|pre|style|textarea)(\s|>|$)/i.test(rest)) return 1;
+  if (rest.startsWith('<!--')) return 2;
+  if (rest.startsWith('<?')) return 3;
+  if (/^<![A-Za-z]/.test(rest)) return 4;
+  if (rest.startsWith('<![CDATA[')) return 5;
+  const m = rest.match(/^<\/?([A-Za-z][A-Za-z0-9-]*)(\s|\/?>|$)/);
+  if (m && BLOCK_TAGS.has(m[1].toLowerCase())) return 6;
+  if (/^<\/?[A-Za-z][A-Za-z0-9-]*(\s[^>]*)?\/?>[ \t]*$/.test(rest)) return 7;
+  return 0;
+}
+
+// Lex an HTML block starting at lines[i]. Returns { block, next } or null.
+function lexHtmlBlock(lines, i) {
+  const n = lines.length;
+  const rest = lines[i].slice(indentOf(lines[i]).chars);
+  const type = htmlBlockType(rest);
+  if (type === 0) return null;
+  let end = i;
+  if (type === 6 || type === 7) {
+    end = i;
+    while (end + 1 < n && !isBlankLine(lines[end + 1])) end++;
+  } else {
+    const closers = { 1: null, 2: '-->', 3: '?>', 4: '>', 5: ']]>' };
+    let tag = null;
+    if (type === 1) {
+      const m = rest.match(/^<(script|pre|style|textarea)/i);
+      tag = '</' + m[1].toLowerCase() + '>';
+    }
+    end = i;
+    const marker = type === 1 ? tag : closers[type];
+    while (end < n) {
+      if (lines[end].toLowerCase().includes(marker)) break;
+      end++;
+    }
+    if (end >= n) end = n - 1;
+  }
+  // Text is the lines joined; the newline after the last line belongs
+  // to the block unless the next line is a blank separator line.
+  let trail = false;
+  if (end + 1 < n) {
+    trail = end + 1 === n - 1 ? true : !isBlankLine(lines[end + 1]);
+  }
+  const text = lines.slice(i, end + 1).join('\n') + (trail ? '\n' : '');
+  return { block: { t: 'html', text }, next: end + 1 };
+}
