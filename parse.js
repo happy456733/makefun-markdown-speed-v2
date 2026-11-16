@@ -374,10 +374,13 @@ function inlineNodes(src, ctx, noLink) {
       }
       if (found === -1) { buf += src.slice(i, i + m); i += m; continue; }
       let content = src.slice(i + m, found);
+      // Line endings become spaces first; then a single space is
+      // stripped from each end when the content starts and ends with
+      // one and is not all spaces.
+      content = content.replace(/\n/g, ' ');
       if (content.length >= 2 && content.charCodeAt(0) === 32 && content.charCodeAt(content.length - 1) === 32 && /[^ ]/.test(content)) {
         content = content.slice(1, -1);
       }
-      content = content.replace(/\n/g, ' ');
       flush();
       nodes.push({ k: 'code', s: content });
       i = found + m;
@@ -1275,10 +1278,13 @@ function lexFencedCode(lines, i, fence, blocks) {
     j++;
   }
   const contentEnd = closed ? j - 1 : n - 1;
-  let text = lines.slice(i + 1, contentEnd + 1).join('\n');
-  // A closed fence ends the content with a newline, unless the content
-  // already ends with one (trailing blank lines).
-  if (closed && !text.endsWith('\n')) text += '\n';
+  // Content lines are dedented by the opening fence's indent.
+  const fenceIndent = indentOf(lines[i]).spaces;
+  const contentLines = lines.slice(i + 1, contentEnd + 1).map((l) => stripIndent(l, fenceIndent));
+  let text = contentLines.join('\n');
+  // A non-empty content ends with a newline, unless it already does
+  // (trailing blank lines). Empty content stays empty.
+  if (text.length > 0 && !text.endsWith('\n')) text += '\n';
   const info = fence.info.trim();
   const lang = info ? info.split(/\s+/)[0] : null;
   blocks.push({ t: 'code', lang, text });
