@@ -1497,3 +1497,302 @@ function lexHtmlBlock(lines, i) {
   const text = lines.slice(i, end + 1).join('\n') + (trail ? '\n' : '');
   return { block: { t: 'html', text }, next: end + 1 };
 }
+
+// Does the line start a block (for lazy-continuation checks)?
+function isBlockStart(line) {
+  const ind = indentOf(line);
+  if (ind.spaces >= 4) return false;
+  const rest = line.slice(ind.chars);
+  if (matchAtx(rest)) return true;
+  if (matchFence(rest)) return true;
+  if (isHr(rest)) return true;
+  if (rest.startsWith('>')) return true;
+  if (matchListMarker(rest)) return true;
+  const ht = htmlBlockType(rest);
+  if (ht >= 1 && ht <= 6) return true;
+  return false;
+}
+
+// Does the block list end with an open paragraph (through trailing
+// blockquotes and list items)? For lazy-continuation checks.
+function endsWithPara(blocks) {
+  if (!blocks || blocks.length === 0) return false;
+  const b = blocks[blocks.length - 1];
+  if (b.t === 'para') return true;
+  if (b.t === 'quote') return endsWithPara(b.blocks);
+  if (b.t === 'list' && b.items.length > 0) return endsWithPara(b.items[b.items.length - 1].blocks);
+  return false;
+}
+
+// Lex a blockquote starting at lines[i]. Returns { block, next }.
+function lexBlockquote(lines, i, ctx) {
+  const n = lines.length;
+  const inner = [];
+  let prevLazy = false;
+  let j = i;
+  while (j < n) {
+    const line = lines[j];
+    const ind = indentOf(line);
+    if (ind.spaces <= 3) {
+      const rest = line.slice(ind.chars);
+      if (rest.startsWith('>')) {
+        let content = rest.slice(1);
+        if (content.startsWith(' ')) content = content.slice(1);
+        inner.push(content);
+        prevLazy = false;
+        j++;
+        continue;
+      }
+    }
+    if (isBlankLine(line)) {
+      // An unmarked blank line ends the quote; the next > line starts
+      // a new blockquote. (A >-marked blank line is handled above.)
+      break;
+    }
+    // Lazy continuation: only if the inner content ends with an open paragraph
+    if (inner.length > 0 && inner[inner.length - 1] !== '' && !isBlockStart(line)) {
+      const soFar = lexBlocks(inner.join('\n'), ctx);
+      if (endsWithPara(soFar)) {
+        // Lazy line: a setext underline after another lazy line is
+        // paragraph text, indented so it cannot become a heading;
+        // otherwise a lazy line loses one indent level (4 spaces).
+        const m = line.match(/^ {0,3}((?:=+|-+)[ \t]*)$/);
+        if (m && prevLazy) inner.push('    ' + m[1]);
+        else if (ind.spaces >= 4) inner.push(stripIndent(line, 4));
+        else inner.push(line);
+        prevLazy = true;
+        j++;
+        continue;
+      }
+    }
+    break;
+  }
+  while (inner.length > 0 && inner[inner.length - 1] === '') inner.pop();
+  const blocks = lexBlocks(inner.join('\n'), ctx);
+  return { block: { t: 'quote', blocks }, next: j };
+}
+
+// Dedent a lazy continuation line for a list item. If the dedented line
+// looks like a list marker, escape it: the line is paragraph text (a lazy
+// continuation), and re-lexing the item's lines must not turn it into a
+// nested list. The escape renders back to the literal character.
+function lazyLine(line, contentIndent) {
+  const s = stripIndent(line, contentIndent);
+  if (/^[-*+]([ \t]|$)/.test(s)) return '\\' + s;
+  const om = s.match(/^(\d{1,9})([.)])([ \t]|$)/);
+  if (om) return om[1] + '\\' + om[2] + s.slice(om[1].length + 1);
+  return s;
+}
+
+// Start a list item at lines[j] with marker m and list indent listIndent.
+function startItem(lines, j, m, listIndent) {
+  const line = lines[j];
+  const ind = indentOf(line);
+  const rest = line.slice(ind.chars);
+  const skip = m.spaces === 0 ? 0 : (m.spaces <= 4 ? m.spaces : 1);
+  let content = rest.slice(m.markerLen + skip);
+  // An empty item's content starts one space after the marker, whatever
+  // whitespace follows the marker on its line.
+  const contentIndent = ind.spaces + m.markerLen + (content.trim() === '' ? 1 : (m.spaces === 0 ? 1 : (m.spaces <= 4 ? m.spaces : 1)));
+  const item = { lines: [], contentIndent, task: false, checked: false };
+  const tm = content.match(/^\[([ xX])\](?:[ \t]+|$)/);
+  if (tm) {
+    item.task = true;
+    item.checked = tm[1] === 'x' || tm[1] === 'X';
+    content = content.slice(tm[0].length);
+  }
+  item.lines.push(content);
+  return item;
+}
+
+// Lex a list starting at lines[i]. Returns { block, next }.
+function lexList(lines, i, ctx) {
+  const n = lines.length;
+  const firstInd = indentOf(lines[i]);
+  const firstMarker = matchListMarker(lines[i].slice(firstInd.chars));
+  const ordered = firstMarker.ordered;
+  const delim = firstMarker.delim;
+  const listIndent = firstInd.spaces;
+  const items = [];
+  let loose = false;
+  let cur = startItem(lines, i, firstMarker, listIndent);
+  let j = i + 1;
+  const itemHasContent = (it) => it.lines.some((l) => !isBlankLine(l));
+  const itemEndsWithPara = (it) => {
+    if (it.lines.length === 0) return false;
+    const last = it.lines[it.lines.length - 1];
+    if (isBlankLine(last)) return false;
+    const blocks = lexBlocks(it.lines.join('\n'), ctx);
+    return endsWithPara(blocks);
+  };
+  while (j < n) {
+    const line = lines[j];
+    if (!isBlankLine(line)) {
+      const li = indentOf(line);
+      const m2 = matchListMarker(line.slice(li.chars));
+      // A marker of the same type is a sibling item when it is indented
+      // 0-3 spaces in this container and below the content indent.
+      if (m2 && m2.ordered === ordered && m2.delim === delim
+          && li.spaces >= listIndent && li.spaces <= 3 && li.spaces < cur.contentIndent) {
+        items.push(cur);
+        cur = startItem(lines, j, m2, listIndent);
+        j++;
+        continue;
+      }
+      // A marker that is not a sibling and not nested content ends the
+      // list (a marker indented 4+ is not a block start, so it can still
+      // be a lazy continuation via the branches below).
+      if (m2 && li.spaces < cur.contentIndent && li.spaces <= 3) break;
+      if (li.spaces < listIndent) {
+        if (itemEndsWithPara(cur) && !isBlockStart(line)) {
+          cur.lines.push(lazyLine(line, cur.contentIndent));
+          j++;
+          continue;
+        }
+        break;
+      }
+      if (li.spaces >= cur.contentIndent) {
+        cur.lines.push(stripIndent(line, cur.contentIndent));
+        j++;
+        continue;
+      }
+      if (itemEndsWithPara(cur) && !isBlockStart(line)) {
+        cur.lines.push(lazyLine(line, cur.contentIndent));
+        j++;
+        continue;
+      }
+      break;
+    }
+    // Blank line: look ahead to the next non-blank line.
+    let k = j + 1;
+    while (k < n && isBlankLine(lines[k])) k++;
+    if (k >= n) break;
+    const nl = lines[k];
+    const nli = indentOf(nl);
+    const m2 = matchListMarker(nl.slice(nli.chars));
+    if (m2 && m2.ordered === ordered && m2.delim === delim
+        && nli.spaces >= listIndent && nli.spaces <= 3 && nli.spaces < cur.contentIndent) {
+      loose = true;
+      items.push(cur);
+      cur = startItem(lines, k, m2, listIndent);
+      j = k + 1;
+      continue;
+    }
+    if (nli.spaces >= cur.contentIndent) {
+      // Content after a blank line attaches only if the item already
+      // has content; after an empty item it is a separate block.
+      if (!itemHasContent(cur)) break;
+      for (let b = j; b < k; b++) cur.lines.push('');
+      j = k;
+      continue;
+    }
+    break;
+  }
+  items.push(cur);
+  // Looseness: blank lines between items (above), or a blank line
+  // separating two top-level blocks inside an item.
+  const built = items.map((it) => {
+    const out = {};
+    return {
+      task: it.task,
+      checked: it.checked,
+      blocks: lexBlocks(it.lines.join('\n'), ctx, out),
+      itemLoose: out.loose,
+    };
+  });
+  const looseFinal = loose || built.some((b) => b.itemLoose);
+  return { block: { t: 'list', ordered, start: firstMarker.start, loose: looseFinal, items: built }, next: j };
+}
+
+// Lex a table starting at lines[i] (header) with delimiter aligns.
+// Returns { block, next }.
+function lexTable(lines, i, delim, ctx) {
+  const n = lines.length;
+  const ind = indentOf(lines[i]);
+  const header = splitRow(lines[i].slice(ind.chars));
+  const rows = [];
+  let j = i + 2;
+  while (j < n && !isBlankLine(lines[j])) {
+    const row = splitRow(lines[j]);
+    while (row.length < header.length) row.push('');
+    rows.push(row.slice(0, header.length));
+    j++;
+  }
+  return { block: { t: 'table', header, aligns: delim, rows }, next: j };
+}
+
+// Render blocks to HTML. tight renders paragraphs without <p> tags.
+function renderBlocks(blocks, ctx, tight) {
+  let out = '';
+  for (const b of blocks) {
+    switch (b.t) {
+      case 'para':
+        out += tight ? parseInline(b.text, ctx) : '<p>' + parseInline(b.text, ctx) + '</p>\n';
+        break;
+      case 'h':
+        out += '<h' + b.level + '>' + parseInline(b.text, ctx) + '</h' + b.level + '>\n';
+        break;
+      case 'code':
+        out += '<pre><code' + (b.lang ? ' class="language-' + escAttr(b.lang) + '"' : '') + '>' + escText(b.text) + '</code></pre>\n';
+        break;
+      case 'hr':
+        out += '<hr>\n';
+        break;
+      case 'html':
+        out += b.text;
+        break;
+      case 'quote':
+        out += '<blockquote>\n' + renderBlocks(b.blocks, ctx, false) + '</blockquote>\n';
+        break;
+      case 'list': {
+        const tag = b.ordered ? 'ol' : 'ul';
+        out += '<' + tag + (b.ordered && b.start !== 1 ? ' start="' + b.start + '"' : '') + '>\n';
+        for (const item of b.items) {
+          const box = item.task
+            ? (item.checked ? '<input checked="" disabled="" type="checkbox"> ' : '<input disabled="" type="checkbox"> ')
+            : '';
+          const body = renderBlocks(item.blocks, ctx, !b.loose);
+          if (b.loose) {
+            out += '<li>' + box + body + '</li>\n';
+          } else {
+            // Tight items keep the body's trailing newline (a code block,
+            // blockquote, heading or nested list ends with one).
+            out += '<li>' + box + body + '</li>\n';
+          }
+        }
+        out += '</' + tag + '>\n';
+        break;
+      }
+      case 'table': {
+        out += '<table>\n<thead>\n<tr>\n';
+        for (let c = 0; c < b.header.length; c++) {
+          const a = b.aligns[c];
+          out += '<th' + (a ? ' align="' + a + '"' : '') + '>' + parseInline(b.header[c], ctx) + '</th>\n';
+        }
+        out += '</tr>\n</thead>\n';
+        if (b.rows.length > 0) {
+          out += '<tbody>\n';
+          for (const row of b.rows) {
+            out += '<tr>\n';
+            for (let c = 0; c < b.header.length; c++) {
+              const a = b.aligns[c];
+              out += '<td' + (a ? ' align="' + a + '"' : '') + '>' + parseInline(row[c], ctx) + '</td>\n';
+            }
+            out += '</tr>\n';
+          }
+          out += '</tbody>\n';
+        }
+        out += '</table>\n';
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// Render Markdown to the HTML marked 18.1.3 renders with default options.
+export function parse(markdown) {
+  const src = markdown.replace(/\r\n?/g, '\n');
+  const ctx = { links: new Map() };
+  return renderBlocks(lexBlocks(src, ctx), ctx, false);
+}
