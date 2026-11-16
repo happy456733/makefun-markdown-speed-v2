@@ -733,8 +733,9 @@ function cleanUrl(href) {
 }
 
 // Try to parse a link starting at src[i] === '['.
-// Returns { node, end } or null.
-function tryLink(src, i, ctx) {
+// allowLink: true when parsing an image description (a link may nest
+// inside image text); false for link text (no nested links).
+function tryLink(src, i, ctx, allowLink) {
   const close = findMatchingBracket(src, i);
   if (close === -1) return null;
   const inner = src.slice(i + 1, close);
@@ -744,7 +745,7 @@ function tryLink(src, i, ctx) {
   if (after < n && src.charCodeAt(after) === 40) {
     const tail = parseInlineTail(src, after);
     if (!tail) return null;
-    const nodes = resolveEmphasis(inlineNodes(inner, ctx, true));
+    const nodes = resolveEmphasis(inlineNodes(inner, ctx, !allowLink));
     return { node: { k: 'link', href: tail.href, title: tail.title, nodes }, end: tail.end };
   }
   // Reference link: [text][label] or [text][]
@@ -755,7 +756,7 @@ function tryLink(src, i, ctx) {
       const label = labelRaw.length === 0 ? normalizeLabel(inner) : normalizeLabel(labelRaw);
       const ref = ctx.links.get(label);
       if (ref) {
-        const nodes = resolveEmphasis(inlineNodes(inner, ctx, true));
+        const nodes = resolveEmphasis(inlineNodes(inner, ctx, !allowLink));
         return { node: { k: 'link', href: ref.href, title: ref.title, nodes }, end: labelClose + 1 };
       }
     }
@@ -764,7 +765,7 @@ function tryLink(src, i, ctx) {
   // Shortcut link: [text]
   const ref = ctx.links.get(normalizeLabel(inner));
   if (ref) {
-    const nodes = resolveEmphasis(inlineNodes(inner, ctx, true));
+    const nodes = resolveEmphasis(inlineNodes(inner, ctx, !allowLink));
     return { node: { k: 'link', href: ref.href, title: ref.title, nodes }, end: after };
   }
   return null;
@@ -783,7 +784,7 @@ function plainText(nodes) {
 
 // Try to parse an image starting at src[i] === '!'.
 function tryImage(src, i, ctx) {
-  const link = tryLink(src, i + 1, ctx);
+  const link = tryLink(src, i + 1, ctx, true);
   if (!link) return null;
   const alt = plainText(link.node.nodes);
   return { node: { k: 'img', src: link.node.href, title: link.node.title, alt }, end: link.end };
@@ -898,7 +899,7 @@ function renderInline(nodes) {
         }
         out += '<img src="' + escAttr(src) + '" alt="' + escAttr(node.alt) + '"';
         if (node.title !== null && node.title !== undefined) out += ' title="' + escAttr(node.title) + '"';
-        out += ' />';
+        out += '>';
         break;
       }
     }
