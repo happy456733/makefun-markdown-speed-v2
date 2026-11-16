@@ -898,3 +898,302 @@ function renderInline(nodes) {
         out += escText(node.s);
         break;
       case 'code':
+        out += '<code>' + escText(node.s) + '</code>';
+        break;
+      case 'br':
+        out += '<br>';
+        break;
+      case 'html':
+        out += node.s;
+        break;
+      case 'd': {
+        let s = '';
+        for (let q = 0; q < node.n; q++) s += node.c;
+        out += escText(s);
+        break;
+      }
+      case 'em':
+        out += '<em>' + renderInline(node.nodes) + '</em>';
+        break;
+      case 'strong':
+        out += '<strong>' + renderInline(node.nodes) + '</strong>';
+        break;
+      case 'del':
+        out += '<del>' + renderInline(node.nodes) + '</del>';
+        break;
+      case 'link': {
+        const href = cleanUrl(node.href);
+        if (href === null) {
+          out += renderInline(node.nodes);
+          break;
+        }
+        out += '<a href="' + escAttr(href) + '"';
+        if (node.title !== null && node.title !== undefined) out += ' title="' + escAttr(node.title) + '"';
+        out += '>' + renderInline(node.nodes) + '</a>';
+        break;
+      }
+      case 'img': {
+        const src = cleanUrl(node.src);
+        if (src === null) {
+          out += escAttr(node.alt);
+          break;
+        }
+        out += '<img src="' + escAttr(src) + '" alt="' + escAttr(node.alt) + '"';
+        if (node.title !== null && node.title !== undefined) out += ' title="' + escAttr(node.title) + '"';
+        out += '>';
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// Parse inline Markdown to HTML.
+function parseInline(src, ctx) {
+  return renderInline(resolveEmphasis(inlineNodes(src, ctx, false)));
+}
+
+// ---------- block parsing ----------
+
+function isBlankLine(line) {
+  for (let i = 0; i < line.length; i++) {
+    const c = line.charCodeAt(i);
+    if (c !== 32 && c !== 9) return false;
+  }
+  return true;
+}
+
+// Indent of a line in spaces (tab stops every 4), and source chars used.
+function indentOf(line) {
+  let spaces = 0;
+  let chars = 0;
+  while (chars < line.length) {
+    const c = line.charCodeAt(chars);
+    if (c === 32) { spaces++; chars++; }
+    else if (c === 9) { spaces += 4 - (spaces % 4); chars++; }
+    else break;
+  }
+  return { spaces, chars };
+}
+
+// Remove n spaces of indentation from a line's start; a tab that straddles
+// the boundary becomes spaces.
+function stripIndent(line, n) {
+  let col = 0;
+  let i = 0;
+  while (i < line.length && col < n) {
+    const c = line.charCodeAt(i);
+    if (c === 32) { col++; i++; }
+    else if (c === 9) {
+      const adv = 4 - (col % 4);
+      if (col + adv <= n) { col += adv; i++; }
+      else return ' '.repeat(col + adv - n) + line.slice(i + 1);
+    } else break;
+  }
+  return line.slice(i);
+}
+
+// Parse one link reference definition at the start of s.
+// Returns { label, href, title, rest } or null.
+function parseLinkRef(s) {
+  let i = 0;
+  const n = s.length;
+  let sp = 0;
+  while (i < n && sp < 3 && (s.charCodeAt(i) === 32 || s.charCodeAt(i) === 9)) { i++; sp++; }
+  if (i >= n || s.charCodeAt(i) !== 91) return null;
+  // Label: [ ... ] with no unescaped [ or ]. An escaped char is skipped
+  // for bracket matching but the backslash stays in the label text.
+  let j = i + 1;
+  let label = '';
+  let ok = false;
+  while (j < n) {
+    const c = s.charCodeAt(j);
+    if (c === 92 && j + 1 < n) { label += s[j]; label += s[j + 1]; j += 2; continue; }
+    if (c === 91) return null;
+    if (c === 93) { ok = true; break; }
+    label += s[j];
+    j++;
+  }
+  if (!ok || label.length === 0 || label.length > 999) return null;
+  // A label that is only whitespace normalizes to empty: not a definition.
+  if (normalizeLabel(label).length === 0) return null;
+  j++;
+  if (j >= n || s.charCodeAt(j) !== 58) return null;
+  j++;
+  // Skip whitespace (dest may be on the next line)
+  while (j < n) {
+    const c = s.charCodeAt(j);
+    if (c === 32 || c === 9 || c === 10) j++;
+    else break;
+  }
+  if (j >= n) return null;
+  // Destination
+  let href;
+  if (s.charCodeAt(j) === 60) {
+    let k = j + 1;
+    let raw = '';
+    let closed = false;
+    while (k < n) {
+      const c = s.charCodeAt(k);
+      if (c === 10 || c === 60) return null;
+      if (c === 92 && k + 1 < n) { raw += s[k] + s[k + 1]; k += 2; continue; }
+      if (c === 62) { closed = true; break; }
+      raw += s[k];
+      k++;
+    }
+    if (!closed) return null;
+    href = decodeDest(raw);
+    j = k + 1;
+  } else {
+    let depth = 0;
+    let raw = '';
+    let k = j;
+    while (k < n) {
+      const c = s.charCodeAt(k);
+      if (c === 92 && k + 1 < n && isAsciiPunct(s.charCodeAt(k + 1))) { raw += s[k] + s[k + 1]; k += 2; continue; }
+      if (c === 32 || c === 9 || c === 10 || c < 32) break;
+      if (c === 40) depth++;
+      if (c === 41) {
+        if (depth === 0) break;
+        depth--;
+      }
+      raw += s[k];
+      k++;
+    }
+    if (raw.length === 0 || depth > 0) return null;
+    href = decodeDest(raw);
+    j = k;
+  }
+  // Optional title: on the destination's line (after spaces/tabs) or on
+  // the next line. It must be preceded by whitespace and followed by a
+  // newline or the end of the text. A title followed by junk is rejected:
+  // on the same line the whole definition fails; on the next line the
+  // definition stands without a title.
+  const afterDest = j;
+  let p = afterDest;
+  while (p < n && (s.charCodeAt(p) === 32 || s.charCodeAt(p) === 9)) p++;
+  const sameLine = p;
+  let nextLine = -1;
+  if (p < n && s.charCodeAt(p) === 10) {
+    let m = p + 1;
+    while (m < n && (s.charCodeAt(m) === 32 || s.charCodeAt(m) === 9)) m++;
+    nextLine = m;
+  }
+  let titleAt = -1;
+  let titleSameLine = false;
+  for (const cand of [sameLine, nextLine]) {
+    if (cand !== -1 && cand < n) {
+      const q = s.charCodeAt(cand);
+      if (q === 34 || q === 39 || q === 40) { titleAt = cand; titleSameLine = (cand === sameLine); break; }
+    }
+  }
+  if (titleAt === -1) {
+    // No title: the destination must be followed by a newline or the end
+    // (only spaces in between). Junk on the same line voids the definition.
+    if (sameLine < n && s.charCodeAt(sameLine) !== 10) return null;
+    return { label: normalizeLabel(label), href, title: null, rest: s.slice(afterDest) };
+  }
+  // A same-line title must be preceded by whitespace: a title delimiter
+  // immediately after the destination is junk, voiding the definition.
+  if (titleSameLine && titleAt === afterDest) return null;
+  const q = s.charCodeAt(titleAt);
+  let closeQ;
+  let allowParen = false;
+  if (q === 34) closeQ = 34;
+  else if (q === 39) closeQ = 39;
+  else { closeQ = 41; allowParen = true; }
+  let k = titleAt + 1;
+  let raw = '';
+  let closed = false;
+  let badParen = false;
+  while (k < n) {
+    const c = s.charCodeAt(k);
+    if (c === 92 && k + 1 < n && isAsciiPunct(s.charCodeAt(k + 1))) { raw += s[k] + s[k + 1]; k += 2; continue; }
+    if (c === closeQ) { closed = true; break; }
+    if (allowParen && c === 40) { badParen = true; break; }
+    raw += s[k];
+    k++;
+  }
+  if (!closed || badParen) {
+    // Malformed title: on the same line the definition fails; on the
+    // next line it stands without a title (rest starts at the newline
+    // after the destination).
+    if (titleSameLine) return null;
+    return { label: normalizeLabel(label), href, title: null, rest: s.slice(p) };
+  }
+  let e = k + 1;
+  while (e < n && (s.charCodeAt(e) === 32 || s.charCodeAt(e) === 9)) e++;
+  if (e >= n || s.charCodeAt(e) === 10) {
+    return { label: normalizeLabel(label), href, title: decodeDestTitle(raw), rest: s.slice(e) };
+  }
+  // Junk after the title: reject the title.
+  if (titleSameLine) return null;
+  return { label: normalizeLabel(label), href, title: null, rest: s.slice(p) };
+}
+
+// Strip leading link reference definitions from paragraph text.
+function stripLinkRefs(text, ctx) {
+  let s = text;
+  for (;;) {
+    const def = parseLinkRef(s);
+    if (!def) break;
+    // The first definition of a label wins.
+    if (!ctx.links.has(def.label)) ctx.links.set(def.label, { href: def.href, title: def.title });
+    s = def.rest.replace(/^[ \t\n]+/, '');
+  }
+  return s;
+}
+
+// Does the line start an ATX heading? Returns { level, content } or null.
+function matchAtx(rest) {
+  const m = rest.match(/^(#{1,6})(?:[ \t]+(.*))?$/);
+  if (!m) return null;
+  let content = m[2] === undefined ? '' : m[2].replace(/[ \t]+$/, '');
+  const cm = content.match(/^(.*?)[ \t]+#+$/);
+  if (cm) content = cm[1];
+  return { level: m[1].length, content };
+}
+
+// Does the line start a fenced code block? Returns { fence, ch, info } or null.
+function matchFence(rest) {
+  const m = rest.match(/^(`{3,}|~{3,})(.*)$/);
+  if (!m) return null;
+  if (m[1][0] === '`' && m[2].indexOf('`') !== -1) return null;
+  return { fence: m[1], ch: m[1][0], info: m[2] };
+}
+
+// Is the line a thematic break?
+function isHr(rest) {
+  return /^(?:\*[ \t]*){3,}$/.test(rest) || /^(?:-[ \t]*){3,}$/.test(rest) || /^(?:_[ \t]*){3,}$/.test(rest);
+}
+
+// Is the line a setext heading underline? Returns 1 or 2, else 0.
+function setextLevel(rest) {
+  if (/^=+[ \t]*$/.test(rest)) return 1;
+  if (/^-+[ \t]*$/.test(rest)) return 2;
+  return 0;
+}
+
+// Is the line a table delimiter row? Returns the alignments array or null.
+function tableDelimiter(rest) {
+  const t = rest.trim();
+  if (t.indexOf('|') === -1) {
+    // A single cell without pipes: only a delimiter if it has a colon
+    // (a plain --- is a setext underline, not a table delimiter).
+    const m = t.match(/^(:?)-+(:?)$/);
+    if (!m || (m[1] === '' && m[2] === '')) return null;
+    return [m[1] && m[2] ? 'center' : m[1] ? 'left' : 'right'];
+  }
+  let cells = t.split('|');
+  if (cells[0] === '') cells = cells.slice(1);
+  if (cells.length && cells[cells.length - 1] === '') cells = cells.slice(0, -1);
+  if (cells.length === 0) return null;
+  const aligns = [];
+  for (let cell of cells) {
+    cell = cell.trim();
+    const m = cell.match(/^(:?)-+(:?)$/);
+    if (!m) return null;
+    aligns.push(m[1] && m[2] ? 'center' : m[1] ? 'left' : m[2] ? 'right' : null);
+  }
+  return aligns;
+}
