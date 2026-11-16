@@ -560,20 +560,11 @@ function matchEmail(src, i) {
   return { text: src.slice(i, end), end };
 }
 
-// Normalize a link label: unescape backslash escapes, collapse
-// whitespace, Unicode case fold (SS sharp-S and ligatures fold).
+// Normalize a link label: collapse whitespace, Unicode case fold
+// (SS sharp-S and ligatures fold). Backslash escapes are NOT unescaped:
+// a label containing \! does not match one containing !.
 function normalizeLabel(s) {
-  let out = '';
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (c === 92 && i + 1 < s.length && isAsciiPunct(s.charCodeAt(i + 1))) {
-      out += s[i + 1];
-      i++;
-      continue;
-    }
-    out += s[i];
-  }
-  return out.replace(/\s+/g, ' ').trim().toLowerCase()
+  return s.replace(/\s+/g, ' ').trim().toLowerCase()
     .replace(/ß/g, 'ss')
     .replace(/ﬀ/g, 'ff').replace(/ﬁ/g, 'fi').replace(/ﬂ/g, 'fl')
     .replace(/ﬃ/g, 'ffi').replace(/ﬄ/g, 'ffl').replace(/ﬅ/g, 'st').replace(/ﬆ/g, 'st');
@@ -1007,19 +998,22 @@ function parseLinkRef(s) {
   let sp = 0;
   while (i < n && sp < 3 && (s.charCodeAt(i) === 32 || s.charCodeAt(i) === 9)) { i++; sp++; }
   if (i >= n || s.charCodeAt(i) !== 91) return null;
-  // Label: [ ... ] with no unescaped [ or ]
+  // Label: [ ... ] with no unescaped [ or ]. An escaped char is skipped
+  // for bracket matching but the backslash stays in the label text.
   let j = i + 1;
   let label = '';
   let ok = false;
   while (j < n) {
     const c = s.charCodeAt(j);
-    if (c === 92 && j + 1 < n) { label += s[j + 1]; j += 2; continue; }
+    if (c === 92 && j + 1 < n) { label += s[j]; label += s[j + 1]; j += 2; continue; }
     if (c === 91) return null;
     if (c === 93) { ok = true; break; }
     label += s[j];
     j++;
   }
   if (!ok || label.length === 0 || label.length > 999) return null;
+  // A label that is only whitespace normalizes to empty: not a definition.
+  if (normalizeLabel(label).length === 0) return null;
   j++;
   if (j >= n || s.charCodeAt(j) !== 58) return null;
   j++;
