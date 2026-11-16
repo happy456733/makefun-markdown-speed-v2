@@ -396,6 +396,12 @@ function matchExtendedAutolink(src, i, prev) {
     if (lastDot === -1 || j <= lastDot + 1) return null;
     const end = consumeAutolinkTail(src, j, i);
     if (end <= i) return null;
+    // The autolink must not be followed by a word character (a trailing
+    // '_' that was trimmed means it was part of a longer word).
+    if (end < n) {
+      const nc = src.charCodeAt(end);
+      if ((nc >= 65 && nc <= 90) || (nc >= 97 && nc <= 122) || (nc >= 48 && nc <= 57) || nc === 95) return null;
+    }
     const url = src.slice(i, end);
     return { href: 'http://' + url, text: url, end };
   }
@@ -434,21 +440,36 @@ function matchSchemeAutolink(src, i, prev) {
   }
   if (at !== -1 && at < cut && !isValidEmailAddr(url.slice(k + 1 - i, cut))) return null;
   // mailto: takes just the email address; xmpp: takes the email plus
-  // one optional /resource segment (no '/' or '@' inside it).
+  // one optional /resource segment (no '/' inside it).
   const scheme = src.slice(i, k);
+  let href = url;
+  let retEnd = end;
   if ((scheme === 'mailto' || scheme === 'xmpp') && at !== -1 && at < cut) {
     if (scheme === 'mailto') {
-      return { href: url.slice(0, cut), text: url.slice(0, cut), end: i + cut };
-    }
-    if (cut < url.length && url[cut] === '/') {
+      href = url.slice(0, cut);
+      retEnd = i + cut;
+    } else if (cut < url.length && url[cut] === '/') {
       let segEnd = cut + 1;
-      while (segEnd < url.length && url[segEnd] !== '/' && url[segEnd] !== '@' && url[segEnd] !== '?' && url[segEnd] !== '#') segEnd++;
-      if (segEnd === cut + 1) return { href: url.slice(0, cut), text: url.slice(0, cut), end: i + cut };
-      return { href: url.slice(0, segEnd), text: url.slice(0, segEnd), end: i + segEnd };
+      while (segEnd < url.length && url[segEnd] !== '/' && url[segEnd] !== '?' && url[segEnd] !== '#') segEnd++;
+      if (segEnd === cut + 1) {
+        href = url.slice(0, cut);
+        retEnd = i + cut;
+      } else {
+        href = url.slice(0, segEnd);
+        retEnd = i + segEnd;
+      }
+    } else {
+      href = url.slice(0, cut);
+      retEnd = i + cut;
     }
-    return { href: url.slice(0, cut), text: url.slice(0, cut), end: i + cut };
   }
-  return { href: url, text: url, end };
+  // The autolink must not be followed by a word character (a trailing
+  // '_' that was trimmed means it was part of a longer word).
+  if (retEnd < n) {
+    const nc = src.charCodeAt(retEnd);
+    if ((nc >= 65 && nc <= 90) || (nc >= 97 && nc <= 122) || (nc >= 48 && nc <= 57) || nc === 95) return null;
+  }
+  return { href, text: href, end: retEnd };
 }
 
 // Is s a valid bare email address (local@domain, labels of alphanumerics
