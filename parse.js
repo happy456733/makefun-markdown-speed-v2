@@ -298,3 +298,303 @@ function matchExtendedAutolink(src, i, prev) {
     while (j < n) {
       const c = src.charCodeAt(j);
       if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 45) { j++; continue; }
+      if (c === 46) {
+        if (j === labelStart) { ok = false; break; }
+        lastDot = j;
+        labelStart = j + 1;
+        j++;
+        continue;
+      }
+      break;
+    }
+    if (!ok || lastDot === -1 || j <= labelStart) return null;
+    // Optional path / query / fragment
+    let end = j;
+    let openParen = 0;
+    while (end < n) {
+      const c = src.charCodeAt(end);
+      if (c === 32 || c === 60 || c === 62 || c === 34 || c === 39) break;
+      if (c === 40) openParen++;
+      if (c === 41) {
+        if (openParen === 0) break;
+        openParen--;
+      }
+      end++;
+    }
+    // Trim trailing punctuation
+    while (end > j) {
+      const c = src.charCodeAt(end - 1);
+      if (c === 63 || c === 33 || c === 46 || c === 44 || c === 58 || c === 59 || c === 42 || c === 95 || c === 126) end--;
+      else break;
+    }
+    if (end <= j) return null;
+    const url = src.slice(i, end);
+    return { href: 'http://' + url, text: url, end };
+  }
+  return null;
+}
+
+// Inline node kinds:
+//  t: text (raw, escaped at render)   d: delimiter (* _ ~)
+//  code: code span (raw)              br: hard break
+//  link: {href, title, nodes}         img: {src, title, alt}
+//  html: raw html                     em/strong/del: {nodes}
+function inlineNodes(src, ctx, noLink) {
+  const nodes = [];
+  const n = src.length;
+  let i = 0;
+  let buf = '';
+  const flush = () => {
+    if (buf) { nodes.push({ k: 't', s: buf }); buf = ''; }
+  };
+  while (i < n) {
+    const c = src.charCodeAt(i);
+    // Backslash escape / hard break
+    if (c === 92) {
+      const d = src.charCodeAt(i + 1);
+      if (d === 10) { flush(); nodes.push({ k: 'br' }); i += 2; continue; }
+      if (i + 1 < n && isAsciiPunct(d)) { buf += src[i + 1]; i += 2; continue; }
+      buf += '\\';
+      i++;
+      continue;
+    }
+    // Code span
+    if (c === 96) {
+      let m = 0;
+      while (i + m < n && src.charCodeAt(i + m) === 96) m++;
+      let j = i + m;
+      let found = -1;
+      while (j < n) {
+        if (src.charCodeAt(j) === 96) {
+          let r = 0;
+          while (j + r < n && src.charCodeAt(j + r) === 96) r++;
+          if (r === m) { found = j; break; }
+          j += r;
+        } else j++;
+      }
+      if (found === -1) { buf += src.slice(i, i + m); i += m; continue; }
+      let content = src.slice(i + m, found);
+      // Line endings become spaces first; then a single space is
+      // stripped from each end when the content starts and ends with
+      // one and is not all spaces.
+      content = content.replace(/\n/g, ' ');
+      if (content.length >= 2 && content.charCodeAt(0) === 32 && content.charCodeAt(content.length - 1) === 32 && /[^ ]/.test(content)) {
+        content = content.slice(1, -1);
+      }
+      flush();
+      nodes.push({ k: 'code', s: content });
+      i = found + m;
+      continue;
+    }
+    // Emphasis delimiters
+    if (c === 42 || c === 95) {
+      const ch = c === 42 ? '*' : '_';
+      let m = 0;
+      while (i + m < n && src.charCodeAt(i + m) === c) m++;
+      const prev = i > 0 ? src[i - 1] : undefined;
+      const next = i + m < n ? src[i + m] : undefined;
+      const leftFlank = !isWSChar(next) && (!isPunctChar(next) || isWSChar(prev) || isPunctChar(prev));
+      const rightFlank = !isWSChar(prev) && (!isPunctChar(prev) || isWSChar(next) || isPunctChar(next));
+      let open, close;
+      if (ch === '*') { open = leftFlank; close = rightFlank; }
+      else {
+        open = leftFlank && (!rightFlank || isPunctChar(prev));
+        close = rightFlank && (!leftFlank || isPunctChar(next));
+      }
+      flush();
+      nodes.push({ k: 'd', c: ch, n: m, open, close });
+      i += m;
+      continue;
+    }
+    // Strikethrough delimiters (pairs of ~)
+    if (c === 126) {
+      let m = 0;
+      while (i + m < n && src.charCodeAt(i + m) === 126) m++;
+      const prev = i > 0 ? src[i - 1] : undefined;
+      const next = i + m < n ? src[i + m] : undefined;
+      const leftFlank = !isWSChar(next) && (!isPunctChar(next) || isWSChar(prev) || isPunctChar(prev));
+      const rightFlank = !isWSChar(prev) && (!isPunctChar(prev) || isWSChar(next) || isPunctChar(next));
+      flush();
+      const pairs = Math.floor(m / 2);
+      for (let p = 0; p < pairs; p++) nodes.push({ k: 'd', c: '~', n: 2, open: leftFlank, close: rightFlank });
+      if (m % 2 === 1) buf += '~';
+      i += m;
+      continue;
+    }
+    // Link / image
+    if (c === 91) {
+      if (!noLink) {
+        const link = tryLink(src, i, ctx);
+        if (link) {
+          flush();
+          nodes.push(link.node);
+          i = link.end;
+          continue;
+        }
+      }
+      buf += '[';
+      i++;
+      continue;
+    }
+    if (c === 33 && src.charCodeAt(i + 1) === 91) {
+      const img = tryImage(src, i, ctx);
+      if (img) {
+        flush();
+        nodes.push(img.node);
+        i = img.end;
+        continue;
+      }
+      buf += '!';
+      i++;
+      continue;
+    }
+    // Raw HTML or autolink
+    if (c === 60) {
+      const auto = matchAutolink(src, i);
+      if (auto) {
+        flush();
+        nodes.push({ k: 'link', href: auto.href, title: null, nodes: [{ k: 't', s: auto.text }], auto: true });
+        i = auto.end;
+        continue;
+      }
+      const tagEnd = matchHtmlTag(src, i);
+      if (tagEnd !== null) {
+        flush();
+        nodes.push({ k: 'html', s: src.slice(i, tagEnd) });
+        i = tagEnd;
+        continue;
+      }
+      buf += '<';
+      i++;
+      continue;
+    }
+    // Entity
+    if (c === 38) {
+      const dec = decodeEntity(src, i);
+      if (dec) { buf += dec[0]; i = dec[1]; continue; }
+      buf += '&';
+      i++;
+      continue;
+    }
+    // Newline: hard break after 2+ spaces, else soft break
+    if (c === 10) {
+      let t = buf.length;
+      while (t > 0 && buf.charCodeAt(t - 1) === 32) t--;
+      if (buf.length - t >= 2) {
+        buf = buf.slice(0, t);
+        flush();
+        nodes.push({ k: 'br' });
+      } else {
+        buf += '\n';
+      }
+      i++;
+      continue;
+    }
+    // Extended autolink (www.) at a word start
+    if ((c === 119 && src.startsWith('www.', i)) || false) {
+      const prev = i > 0 ? src[i - 1] : undefined;
+      const ext = matchExtendedAutolink(src, i, prev);
+      if (ext) {
+        flush();
+        nodes.push({ k: 'link', href: ext.href, title: null, nodes: [{ k: 't', s: ext.text }], auto: true });
+        i = ext.end;
+        continue;
+      }
+    }
+    // Plain character (including email autolink starts: handled below)
+    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+      // Possible email autolink: word@domain.tld
+      const prev = i > 0 ? src[i - 1] : undefined;
+      if (prev === undefined || isWSChar(prev) || isPunctChar(prev)) {
+        const m = matchEmail(src, i);
+        if (m) {
+          flush();
+          nodes.push({ k: 'link', href: 'mailto:' + m.text, title: null, nodes: [{ k: 't', s: m.text }], auto: true });
+          i = m.end;
+          continue;
+        }
+      }
+    }
+    buf += src[i];
+    i++;
+  }
+  flush();
+  return nodes;
+}
+
+// Match an email address starting at src[i] (a word char).
+// Returns { text, end } or null.
+function matchEmail(src, i) {
+  const n = src.length;
+  let j = i;
+  while (j < n) {
+    const c = src.charCodeAt(j);
+    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || ASCII_PUNCT.indexOf(src[j]) >= 0) {
+      if (src[j] === '@') break;
+      j++;
+    } else break;
+  }
+  if (j === i || j >= n || src.charCodeAt(j) !== 64) return null;
+  let d = j + 1;
+  let lastDot = -1;
+  let labelStart = d;
+  let ok = true;
+  while (d < n) {
+    const c = src.charCodeAt(d);
+    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 45) { d++; continue; }
+    if (c === 46) {
+      if (d === labelStart) { ok = false; break; }
+      lastDot = d;
+      labelStart = d + 1;
+      d++;
+      continue;
+    }
+    break;
+  }
+  if (!ok || lastDot === -1 || d <= labelStart) return null;
+  // Trim trailing punctuation
+  let end = d;
+  while (end > j + 1) {
+    const c = src.charCodeAt(end - 1);
+    if (c === 63 || c === 33 || c === 46 || c === 44 || c === 58 || c === 59) end--;
+    else break;
+  }
+  if (end <= j + 1) return null;
+  return { text: src.slice(i, end), end };
+}
+
+// Normalize a link label: collapse whitespace, Unicode case fold
+// (SS sharp-S and ligatures fold). Backslash escapes are NOT unescaped:
+// a label containing \! does not match one containing !.
+function normalizeLabel(s) {
+  return s.replace(/\s+/g, ' ').trim().toLowerCase()
+    .replace(/ß/g, 'ss')
+    .replace(/ﬀ/g, 'ff').replace(/ﬁ/g, 'fi').replace(/ﬂ/g, 'fl')
+    .replace(/ﬃ/g, 'ffi').replace(/ﬄ/g, 'ffl').replace(/ﬅ/g, 'st').replace(/ﬆ/g, 'st');
+}
+
+// Find the index of the ']' matching the '[' at src[i]. Skips code spans,
+// backslash escapes, and <...> autolinks / HTML tags (a ']' inside one
+// does not close the link). Returns -1 if there is none.
+function findMatchingBracket(src, i) {
+  const n = src.length;
+  let depth = 0;
+  let j = i + 1;
+  while (j < n) {
+    const c = src.charCodeAt(j);
+    if (c === 92) { j += 2; continue; }
+    if (c === 60) {
+      const auto = matchAutolink(src, j);
+      if (auto) { j = auto.end; continue; }
+      const te = matchHtmlTag(src, j);
+      if (te !== null) { j = te; continue; }
+    }
+    if (c === 96) {
+      let m = 0;
+      while (j + m < n && src.charCodeAt(j + m) === 96) m++;
+      let k = j + m;
+      let found = false;
+      while (k < n) {
+        if (src.charCodeAt(k) === 96) {
+          let r = 0;
+          while (k + r < n && src.charCodeAt(k + r) === 96) r++;
