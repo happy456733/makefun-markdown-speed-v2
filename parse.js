@@ -1061,44 +1061,68 @@ function parseLinkRef(s) {
     href = decodeDest(raw);
     j = k;
   }
-  // Optional title on this line or the next
-  let title = null;
-  let saveJ = j;
-  while (j < n) {
-    const c = s.charCodeAt(j);
-    if (c === 32 || c === 9 || c === 10) j++;
-    else break;
+  // Optional title: on the destination's line (after spaces/tabs) or on
+  // the next line. It must be preceded by whitespace and followed by a
+  // newline or the end of the text. A title followed by junk is rejected:
+  // on the same line the whole definition fails; on the next line the
+  // definition stands without a title.
+  const afterDest = j;
+  let p = afterDest;
+  while (p < n && (s.charCodeAt(p) === 32 || s.charCodeAt(p) === 9)) p++;
+  const sameLine = p;
+  let nextLine = -1;
+  if (p < n && s.charCodeAt(p) === 10) {
+    let m = p + 1;
+    while (m < n && (s.charCodeAt(m) === 32 || s.charCodeAt(m) === 9)) m++;
+    nextLine = m;
   }
-  if (j < n) {
-    const q = s.charCodeAt(j);
-    let closeQ;
-    let allowParen = false;
-    if (q === 34) closeQ = 34;
-    else if (q === 39) closeQ = 39;
-    else if (q === 40) { closeQ = 41; allowParen = true; }
-    if (closeQ !== undefined) {
-      let k = j + 1;
-      let raw = '';
-      let closed = false;
-      while (k < n) {
-        const c = s.charCodeAt(k);
-        if (c === 92 && k + 1 < n && isAsciiPunct(s.charCodeAt(k + 1))) { raw += s[k] + s[k + 1]; k += 2; continue; }
-        if (c === closeQ) { closed = true; break; }
-        if (allowParen && c === 40) { closed = false; k = -1; break; }
-        raw += s[k];
-        k++;
-      }
-      if (closed) {
-        title = decodeDestTitle(raw);
-        j = k + 1;
-      } else if (k === -1) {
-        j = saveJ;
-      } else {
-        return null;
-      }
+  let titleAt = -1;
+  let titleSameLine = false;
+  for (const cand of [sameLine, nextLine]) {
+    if (cand !== -1 && cand < n) {
+      const q = s.charCodeAt(cand);
+      if (q === 34 || q === 39 || q === 40) { titleAt = cand; titleSameLine = (cand === sameLine); break; }
     }
   }
-  return { label: normalizeLabel(label), href, title, rest: s.slice(j) };
+  if (titleAt === -1) {
+    // No title: the destination must be followed by a newline or the end
+    // (only spaces in between). Junk on the same line voids the definition.
+    if (sameLine < n && s.charCodeAt(sameLine) !== 10) return null;
+    return { label: normalizeLabel(label), href, title: null, rest: s.slice(afterDest) };
+  }
+  const q = s.charCodeAt(titleAt);
+  let closeQ;
+  let allowParen = false;
+  if (q === 34) closeQ = 34;
+  else if (q === 39) closeQ = 39;
+  else { closeQ = 41; allowParen = true; }
+  let k = titleAt + 1;
+  let raw = '';
+  let closed = false;
+  let badParen = false;
+  while (k < n) {
+    const c = s.charCodeAt(k);
+    if (c === 92 && k + 1 < n && isAsciiPunct(s.charCodeAt(k + 1))) { raw += s[k] + s[k + 1]; k += 2; continue; }
+    if (c === closeQ) { closed = true; break; }
+    if (allowParen && c === 40) { badParen = true; break; }
+    raw += s[k];
+    k++;
+  }
+  if (!closed || badParen) {
+    // Malformed title: on the same line the definition fails; on the
+    // next line it stands without a title (rest starts at the newline
+    // after the destination).
+    if (titleSameLine) return null;
+    return { label: normalizeLabel(label), href, title: null, rest: s.slice(p) };
+  }
+  let e = k + 1;
+  while (e < n && (s.charCodeAt(e) === 32 || s.charCodeAt(e) === 9)) e++;
+  if (e >= n || s.charCodeAt(e) === 10) {
+    return { label: normalizeLabel(label), href, title: decodeDestTitle(raw), rest: s.slice(e) };
+  }
+  // Junk after the title: reject the title.
+  if (titleSameLine) return null;
+  return { label: normalizeLabel(label), href, title: null, rest: s.slice(p) };
 }
 
 // Strip leading link reference definitions from paragraph text.
@@ -1276,7 +1300,11 @@ function lexParagraph(lines, i, ctx) {
       const sl = setextLevel(rest);
       if (sl) {
         const text = stripLinkRefs(paraLines.join('\n'), ctx).trim();
-        return { block: text ? { t: 'h', level: sl, text } : null, next: j + 1 };
+        if (text) {
+          return { block: { t: 'h', level: sl, text }, next: j + 1 };
+        }
+        // The paragraph so far is only link reference definitions: the
+        // underline is ordinary paragraph text, not a heading.
       }
       const delim = tableDelimiter(rest.trim());
       if (delim && paraLines.length > 0) {
