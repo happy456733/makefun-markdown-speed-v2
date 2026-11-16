@@ -1184,7 +1184,8 @@ function lexIndentedCode(lines, i, blocks) {
   for (let k = i; k <= lastContent; k++) {
     content.push(isBlankLine(lines[k]) ? '' : stripIndent(lines[k], 4));
   }
-  const text = content.join('\n') + (lastContent < n - 1 ? '\n' : '');
+  // Code block text always ends with a newline, even at end of input.
+  const text = content.join('\n') + '\n';
   blocks.push({ t: 'code', lang: null, text });
   return end;
 }
@@ -1228,7 +1229,7 @@ function lexParagraph(lines, i, ctx) {
     if (j > i && ind.spaces <= 3) {
       const sl = setextLevel(rest);
       if (sl) {
-        const text = stripLinkRefs(paraLines.join('\n'), ctx);
+        const text = stripLinkRefs(paraLines.join('\n'), ctx).trim();
         return { block: text ? { t: 'h', level: sl, text } : null, next: j + 1 };
       }
       const delim = tableDelimiter(rest.trim());
@@ -1247,7 +1248,7 @@ function lexParagraph(lines, i, ctx) {
       if (lm && listCanInterrupt(lm)) break;
       if (htmlBlockType(rest) >= 1 && htmlBlockType(rest) <= 6) break;
     }
-    paraLines.push(stripIndent(line, 3));
+    paraLines.push(line);
     j++;
   }
   if (tableSplit !== -1) {
@@ -1540,7 +1541,7 @@ function lexList(lines, i, ctx) {
     }
     if (nli.spaces >= cur.contentIndent) {
       if (itemHasContent(cur)) loose = true;
-      cur.lines.push('');
+      for (let b = j; b < k; b++) cur.lines.push('');
       j = k;
       continue;
     }
