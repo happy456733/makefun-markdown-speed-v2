@@ -1338,14 +1338,26 @@ function lexParagraph(lines, i, ctx) {
 }
 
 // Lex blocks from a source string. ctx carries the link reference map.
-function lexBlocks(src, ctx) {
+// If out is given, out.loose is set when a blank line separates two
+// top-level blocks in this call (used for list looseness).
+function lexBlocks(src, ctx, out) {
   const lines = src.split('\n');
   const blocks = [];
   const n = lines.length;
   let i = 0;
+  let loose = false;
   while (i < n) {
     const line = lines[i];
-    if (isBlankLine(line)) { i++; continue; }
+    if (isBlankLine(line)) {
+      // A blank line after a block makes this loose if more content follows.
+      if (blocks.length > 0) {
+        let k = i + 1;
+        while (k < n && isBlankLine(lines[k])) k++;
+        if (k < n) loose = true;
+      }
+      i++;
+      continue;
+    }
     const ind = indentOf(line);
     const rest = line.slice(ind.chars);
     if (ind.spaces >= 4) {
@@ -1395,6 +1407,7 @@ function lexBlocks(src, ctx) {
     if (p.block) blocks.push(p.block);
     i = p.next;
   }
+  if (out) out.loose = loose;
   return blocks;
 }
 
@@ -1596,16 +1609,20 @@ function lexList(lines, i, ctx) {
     const line = lines[j];
     if (!isBlankLine(line)) {
       const li = indentOf(line);
-      if (li.spaces === listIndent) {
-        const m2 = matchListMarker(line.slice(li.chars));
-        if (m2 && m2.ordered === ordered && m2.delim === delim) {
-          items.push(cur);
-          cur = startItem(lines, j, m2, listIndent);
-          j++;
-          continue;
-        }
-        if (m2) break;
+      const m2 = matchListMarker(line.slice(li.chars));
+      // A marker of the same type is a sibling item when it is indented
+      // 0-3 spaces in this container and below the content indent.
+      if (m2 && m2.ordered === ordered && m2.delim === delim
+          && li.spaces >= listIndent && li.spaces <= 3 && li.spaces < cur.contentIndent) {
+        items.push(cur);
+        cur = startItem(lines, j, m2, listIndent);
+        j++;
+        continue;
       }
+      // A marker that is not a sibling and not nested content ends the
+      // list (a marker indented 4+ is not a block start, so it can still
+      // be a lazy continuation via the branches below).
+      if (m2 && li.spaces < cur.contentIndent && li.spaces <= 3) break;
       if (li.spaces < listIndent) {
         if (itemEndsWithPara(cur) && !isBlockStart(line)) {
           cur.lines.push(stripIndent(line, cur.contentIndent));
@@ -1632,21 +1649,19 @@ function lexList(lines, i, ctx) {
     if (k >= n) break;
     const nl = lines[k];
     const nli = indentOf(nl);
-    if (nli.spaces === listIndent) {
-      const m2 = matchListMarker(nl.slice(nli.chars));
-      if (m2 && m2.ordered === ordered && m2.delim === delim) {
-        loose = true;
-        items.push(cur);
-        cur = startItem(lines, k, m2, listIndent);
-        j = k + 1;
-        continue;
-      }
+    const m2 = matchListMarker(nl.slice(nli.chars));
+    if (m2 && m2.ordered === ordered && m2.delim === delim
+        && nli.spaces >= listIndent && nli.spaces <= 3 && nli.spaces < cur.contentIndent) {
+      loose = true;
+      items.push(cur);
+      cur = startItem(lines, k, m2, listIndent);
+      j = k + 1;
+      continue;
     }
     if (nli.spaces >= cur.contentIndent) {
       // Content after a blank line attaches only if the item already
       // has content; after an empty item it is a separate block.
       if (!itemHasContent(cur)) break;
-      loose = true;
       for (let b = j; b < k; b++) cur.lines.push('');
       j = k;
       continue;
@@ -1654,12 +1669,19 @@ function lexList(lines, i, ctx) {
     break;
   }
   items.push(cur);
-  const built = items.map((it) => ({
-    task: it.task,
-    checked: it.checked,
-    blocks: lexBlocks(it.lines.join('\n'), ctx),
-  }));
-  return { block: { t: 'list', ordered, start: firstMarker.start, loose, items: built }, next: j };
+  // Looseness: blank lines between items (above), or a blank line
+  // separating two top-level blocks inside an item.
+  const built = items.map((it) => {
+    const out = {};
+    return {
+      task: it.task,
+      checked: it.checked,
+      blocks: lexBlocks(it.lines.join('\n'), ctx, out),
+      itemLoose: out.loose,
+    };
+  });
+  const looseFinal = loose || built.some((b) => b.itemLoose);
+  return { block: { t: 'list', ordered, start: firstMarker.start, loose: looseFinal, items: built }, next: j };
 }
 
 // Lex a table starting at lines[i] (header) with delimiter aligns.
