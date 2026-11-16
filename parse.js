@@ -1446,6 +1446,11 @@ function lexBlockquote(lines, i, ctx) {
       }
     }
     if (isBlankLine(line)) {
+      // A chunk ending in code/heading/hr/html/table ends the quote:
+      // the next > line starts a new blockquote.
+      const soFar = lexBlocks(inner.join('\n'), ctx);
+      const last = soFar[soFar.length - 1];
+      if (last && (last.t === 'code' || last.t === 'h' || last.t === 'hr' || last.t === 'html' || last.t === 'table')) break;
       inner.push('');
       prevLazy = false;
       j++;
