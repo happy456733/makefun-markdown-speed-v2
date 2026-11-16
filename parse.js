@@ -1414,6 +1414,17 @@ function isBlockStart(line) {
   return false;
 }
 
+// Does the block list end with an open paragraph (through trailing
+// blockquotes and list items)? For lazy-continuation checks.
+function endsWithPara(blocks) {
+  if (!blocks || blocks.length === 0) return false;
+  const b = blocks[blocks.length - 1];
+  if (b.t === 'para') return true;
+  if (b.t === 'quote') return endsWithPara(b.blocks);
+  if (b.t === 'list' && b.items.length > 0) return endsWithPara(b.items[b.items.length - 1].blocks);
+  return false;
+}
+
 // Lex a blockquote starting at lines[i]. Returns { block, next }.
 function lexBlockquote(lines, i, ctx) {
   const n = lines.length;
@@ -1443,8 +1454,7 @@ function lexBlockquote(lines, i, ctx) {
     // Lazy continuation: only if the inner content ends with an open paragraph
     if (inner.length > 0 && inner[inner.length - 1] !== '' && !isBlockStart(line)) {
       const soFar = lexBlocks(inner.join('\n'), ctx);
-      const last = soFar[soFar.length - 1];
-      if (last && last.t === 'para') {
+      if (endsWithPara(soFar)) {
         // A setext underline on a lazy line after another lazy line is
         // paragraph text, indented so it cannot become a heading.
         const m = line.match(/^ {0,3}((?:=+|-+)[ \t]*)$/);
@@ -1498,8 +1508,7 @@ function lexList(lines, i, ctx) {
     const last = it.lines[it.lines.length - 1];
     if (isBlankLine(last)) return false;
     const blocks = lexBlocks(it.lines.join('\n'), ctx);
-    const b = blocks[blocks.length - 1];
-    return !!b && b.t === 'para';
+    return endsWithPara(blocks);
   };
   while (j < n) {
     const line = lines[j];
