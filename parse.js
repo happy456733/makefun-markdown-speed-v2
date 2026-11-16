@@ -30,24 +30,17 @@ export function escText(s) {
   return start === 0 ? s : out + s.slice(start);
 }
 
-// Escape &, <, >, " for attribute values.
+// Escape &, <, >, " and ' for attribute values. A bare & is escaped,
+// but & starting a valid entity reference (&name;, &#123;, &#x1F;) is
+// left as-is, matching marked.
 export function escAttr(s) {
-  let out = '';
-  let start = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    let rep = null;
-    if (c === 38) rep = AMP;
-    else if (c === 60) rep = LT;
-    else if (c === 62) rep = GT;
-    else if (c === 34) rep = QUOT;
-    if (rep !== null) {
-      if (i > start) out += s.slice(start, i);
-      out += rep;
-      start = i + 1;
-    }
-  }
-  return start === 0 ? s : out + s.slice(start);
+  return s.replace(/[<>"']|&(?!(#\d{1,7}|#[Xx][a-fA-F0-9]{1,6}|\w+);)/g, (ch) => {
+    if (ch === '&') return AMP;
+    if (ch === '<') return LT;
+    if (ch === '>') return GT;
+    if (ch === '"') return QUOT;
+    return APOS;
+  });
 }
 
 // Named HTML entities (name -> code point). Covers the entities the
@@ -567,13 +560,28 @@ function matchEmail(src, i) {
   return { text: src.slice(i, end), end };
 }
 
-// Normalize a link label: collapse whitespace, lowercase, trim.
+// Normalize a link label: unescape backslash escapes, collapse
+// whitespace, Unicode case fold (SS sharp-S and ligatures fold).
 function normalizeLabel(s) {
-  return s.replace(/\s+/g, ' ').trim().toLowerCase();
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 92 && i + 1 < s.length && isAsciiPunct(s.charCodeAt(i + 1))) {
+      out += s[i + 1];
+      i++;
+      continue;
+    }
+    out += s[i];
+  }
+  return out.replace(/\s+/g, ' ').trim().toLowerCase()
+    .replace(/ß/g, 'ss')
+    .replace(/ﬀ/g, 'ff').replace(/ﬁ/g, 'fi').replace(/ﬂ/g, 'fl')
+    .replace(/ﬃ/g, 'ffi').replace(/ﬄ/g, 'ffl').replace(/ﬅ/g, 'st').replace(/ﬆ/g, 'st');
 }
 
-// Find the index of the ']' matching the '[' at src[i]. Skips code spans
-// and backslash escapes. Returns -1 if there is none.
+// Find the index of the ']' matching the '[' at src[i]. Skips code spans,
+// backslash escapes, and <...> autolinks / HTML tags (a ']' inside one
+// does not close the link). Returns -1 if there is none.
 function findMatchingBracket(src, i) {
   const n = src.length;
   let depth = 0;
@@ -581,6 +589,12 @@ function findMatchingBracket(src, i) {
   while (j < n) {
     const c = src.charCodeAt(j);
     if (c === 92) { j += 2; continue; }
+    if (c === 60) {
+      const auto = matchAutolink(src, j);
+      if (auto) { j = auto.end; continue; }
+      const te = matchHtmlTag(src, j);
+      if (te !== null) { j = te; continue; }
+    }
     if (c === 96) {
       let m = 0;
       while (j + m < n && src.charCodeAt(j + m) === 96) m++;
@@ -609,7 +623,25 @@ function findMatchingBracket(src, i) {
   return -1;
 }
 
-// Decode backslash escapes and entities inside a link destination or title.
+// Decode backslash escapes only inside a link destination.
+// (Entities in a destination stay literal, e.g. foo%20b&auml;.)
+function decodeDest(s) {
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c === 92 && i + 1 < s.length && isAsciiPunct(s.charCodeAt(i + 1))) {
+      out += s[i + 1];
+      i += 2;
+      continue;
+    }
+    out += s[i];
+    i++;
+  }
+  return out;
+}
+
+// Decode backslash escapes and entities inside a link title.
 function decodeDestTitle(s) {
   let out = '';
   let i = 0;
@@ -659,7 +691,7 @@ function parseInlineTail(src, i) {
       k++;
     }
     if (!closed) return null;
-    href = decodeDestTitle(raw);
+    href = decodeDest(raw);
     j = k + 1;
   } else {
     // Bare destination: no spaces/control, balanced parens
@@ -684,12 +716,12 @@ function parseInlineTail(src, i) {
     }
     if (closed) {
       // The ')' closed the link: no title possible
-      href = decodeDestTitle(raw);
+      href = decodeDest(raw);
       return { href, title: null, end: k + 1 };
     }
     if (depth > 0) return null;
     if (raw.length === 0) return null;
-    href = decodeDestTitle(raw);
+    href = decodeDest(raw);
     j = k;
   }
   skipWS();
@@ -732,6 +764,16 @@ function cleanUrl(href) {
   }
 }
 
+// Does a parsed inline node tree contain a non-autolink link?
+// (Autolinks may nest inside link text; other links may not.)
+function containsLink(nodes) {
+  for (const node of nodes) {
+    if (node.k === 'link' && !node.auto) return true;
+    if (node.nodes && containsLink(node.nodes)) return true;
+  }
+  return false;
+}
+
 // Try to parse a link starting at src[i] === '['.
 // allowLink: true when parsing an image description (a link may nest
 // inside image text); false for link text (no nested links).
@@ -741,12 +783,17 @@ function tryLink(src, i, ctx, allowLink) {
   const inner = src.slice(i + 1, close);
   const after = close + 1;
   const n = src.length;
+  // Parse the text with links allowed. A link's text may not contain a
+  // (non-autolink) link; an image description may.
+  const nodes = resolveEmphasis(inlineNodes(inner, ctx, false));
+  if (!allowLink && containsLink(nodes)) return null;
   // Inline link: [text](...)
   if (after < n && src.charCodeAt(after) === 40) {
     const tail = parseInlineTail(src, after);
-    if (!tail) return null;
-    const nodes = resolveEmphasis(inlineNodes(inner, ctx, !allowLink));
-    return { node: { k: 'link', href: tail.href, title: tail.title, nodes }, end: tail.end };
+    if (tail) {
+      return { node: { k: 'link', href: tail.href, title: tail.title, nodes }, end: tail.end };
+    }
+    // Invalid inline form: fall through to reference / shortcut.
   }
   // Reference link: [text][label] or [text][]
   if (after < n && src.charCodeAt(after) === 91) {
@@ -756,16 +803,16 @@ function tryLink(src, i, ctx, allowLink) {
       const label = labelRaw.length === 0 ? normalizeLabel(inner) : normalizeLabel(labelRaw);
       const ref = ctx.links.get(label);
       if (ref) {
-        const nodes = resolveEmphasis(inlineNodes(inner, ctx, !allowLink));
         return { node: { k: 'link', href: ref.href, title: ref.title, nodes }, end: labelClose + 1 };
       }
+      // A complete [label] follows but is undefined: no shortcut fallback.
+      return null;
     }
-    // Fall through to the shortcut form below.
+    // No closing bracket for the label: fall through to shortcut.
   }
   // Shortcut link: [text]
   const ref = ctx.links.get(normalizeLabel(inner));
   if (ref) {
-    const nodes = resolveEmphasis(inlineNodes(inner, ctx, !allowLink));
     return { node: { k: 'link', href: ref.href, title: ref.title, nodes }, end: after };
   }
   return null;
@@ -969,7 +1016,6 @@ function parseLinkRef(s) {
     if (c === 92 && j + 1 < n) { label += s[j + 1]; j += 2; continue; }
     if (c === 91) return null;
     if (c === 93) { ok = true; break; }
-    if (c === 10) return null;
     label += s[j];
     j++;
   }
@@ -999,7 +1045,7 @@ function parseLinkRef(s) {
       k++;
     }
     if (!closed) return null;
-    href = decodeDestTitle(raw);
+    href = decodeDest(raw);
     j = k + 1;
   } else {
     let depth = 0;
@@ -1018,7 +1064,7 @@ function parseLinkRef(s) {
       k++;
     }
     if (raw.length === 0 || depth > 0) return null;
-    href = decodeDestTitle(raw);
+    href = decodeDest(raw);
     j = k;
   }
   // Optional title on this line or the next
@@ -1067,7 +1113,8 @@ function stripLinkRefs(text, ctx) {
   for (;;) {
     const def = parseLinkRef(s);
     if (!def) break;
-    ctx.links.set(def.label, { href: def.href, title: def.title });
+    // The first definition of a label wins.
+    if (!ctx.links.has(def.label)) ctx.links.set(def.label, { href: def.href, title: def.title });
     s = def.rest.replace(/^[ \t\n]+/, '');
   }
   return s;
