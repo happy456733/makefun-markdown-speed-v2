@@ -1276,7 +1276,9 @@ function lexFencedCode(lines, i, fence, blocks) {
   }
   const contentEnd = closed ? j - 1 : n - 1;
   let text = lines.slice(i + 1, contentEnd + 1).join('\n');
-  if (closed) text += '\n';
+  // A closed fence ends the content with a newline, unless the content
+  // already ends with one (trailing blank lines).
+  if (closed && !text.endsWith('\n')) text += '\n';
   const info = fence.info.trim();
   const lang = info ? info.split(/\s+/)[0] : null;
   blocks.push({ t: 'code', lang, text });
@@ -1564,6 +1566,18 @@ function lexBlockquote(lines, i, ctx) {
   return { block: { t: 'quote', blocks }, next: j };
 }
 
+// Dedent a lazy continuation line for a list item. If the dedented line
+// looks like a list marker, escape it: the line is paragraph text (a lazy
+// continuation), and re-lexing the item's lines must not turn it into a
+// nested list. The escape renders back to the literal character.
+function lazyLine(line, contentIndent) {
+  const s = stripIndent(line, contentIndent);
+  if (/^[-*+]([ \t]|$)/.test(s)) return '\\' + s;
+  const om = s.match(/^(\d{1,9})([.)])([ \t]|$)/);
+  if (om) return om[1] + '\\' + om[2] + s.slice(om[1].length + 1);
+  return s;
+}
+
 // Start a list item at lines[j] with marker m and list indent listIndent.
 function startItem(lines, j, m, listIndent) {
   const line = lines[j];
@@ -1625,7 +1639,7 @@ function lexList(lines, i, ctx) {
       if (m2 && li.spaces < cur.contentIndent && li.spaces <= 3) break;
       if (li.spaces < listIndent) {
         if (itemEndsWithPara(cur) && !isBlockStart(line)) {
-          cur.lines.push(stripIndent(line, cur.contentIndent));
+          cur.lines.push(lazyLine(line, cur.contentIndent));
           j++;
           continue;
         }
@@ -1637,7 +1651,7 @@ function lexList(lines, i, ctx) {
         continue;
       }
       if (itemEndsWithPara(cur) && !isBlockStart(line)) {
-        cur.lines.push(stripIndent(line, cur.contentIndent));
+        cur.lines.push(lazyLine(line, cur.contentIndent));
         j++;
         continue;
       }
